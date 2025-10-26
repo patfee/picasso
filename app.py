@@ -72,3 +72,9 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
     if df.empty:
         raise ValueError(f"{path} parsed to an empty DataFrame. Check delimiter/layout.")
     return df
+
+# --- entry points ---
+app, server = create_app()
+
+if __name__ == "__main__":
+    app.run_server(host="0.0.0.0", port=int(os.getenv("PORT", 8050)), debug=True)
