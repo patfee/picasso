@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: crane-curve-dash
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:server
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: DATA_DIR
+        value: "./data"
+      - key: HEIGHT_CSV
+        value: "height.csv"
+      - key: OUTREACH_CSV
+        value: "outreach.csv"
