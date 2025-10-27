@@ -14,7 +14,6 @@ import shapely.geometry as sgeom
 import alphashape
 from numpy.linalg import matrix_rank
 
-
 # =========================
 # Config
 # =========================
@@ -26,6 +25,10 @@ LOGO_URL = os.getenv(
     "LOGO_URL",
     "https://www.google.com/url?sa=i&url=https%3A%2F%2Fdcndiving.com%2F&psig=AOvVaw08weDg3_w7rLPAiYloISj5&ust=1761566373095000&source=images&cd=vfe&opi=89978449&ved=0CBUQjRxqFwoTCPj8qaPowZADFQAAAAAdAAAAABAE",
 )
+
+# Display/perf caps (tune if needed)
+MAX_POINTS_FOR_DISPLAY = 15000  # Plotly slows beyond ~20k markers
+MAX_POINTS_FOR_ENVELOPE = 8000  # alphashape gets heavy above this
 
 
 # =========================
@@ -120,42 +123,76 @@ def resample_grid(fold_angles, main_angles, d_fold: float, d_main: float):
     return fnew, mnew, F, M, pts
 
 
+def _sample_points(arr: np.ndarray, max_n: int) -> np.ndarray:
+    """Uniformly downsample rows of arr (without replacement) to <= max_n."""
+    n = len(arr)
+    if n <= max_n:
+        return arr
+    idx = np.linspace(0, n - 1, num=max_n, dtype=int)
+    return arr[idx]
+
+
 def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
-    if xy_points is None or len(xy_points) < 3:
+    """Robust envelope builder:
+    - Drop NaNs/dupes
+    - Detect near-1D clouds (singular); return convex hull/line
+    - Else try concave on a capped subset; fall back to convex hull
+    """
+    if xy_points is None:
         return None
     pts = np.asarray(xy_points, dtype=float)
     pts = pts[~np.isnan(pts).any(axis=1)]
     if len(pts) < 3:
         return None
+
+    # remove duplicates
     pts = np.unique(pts, axis=0)
     if len(pts) < 3:
         return None
 
+    # detect near-collinearity (rank-1 or very ill-conditioned)
     centered = pts - pts.mean(axis=0)
-    if matrix_rank(centered) < 2:
+    try:
+        s = np.linalg.svd(centered, compute_uv=False)
+        near_1d = (len(s) < 2) or (s[1] <= 1e-8 * s[0])
+    except Exception:
+        near_1d = True
+
+    # If ~1-D, convex hull/line is the only stable output
+    if near_1d:
         try:
             hull = sgeom.MultiPoint(pts).convex_hull
             if isinstance(hull, sgeom.Polygon):
                 x, y = hull.exterior.coords.xy
                 return np.column_stack([np.asarray(x), np.asarray(y)])
+            elif isinstance(hull, sgeom.LineString):
+                x, y = hull.coords.xy
+                return np.column_stack([np.asarray(x), np.asarray(y)])
             return None
         except Exception:
             return None
 
+    # Otherwise, attempt concave hull on a capped subset
     poly = None
     if prefer_concave:
         try:
-            alpha = alphashape.optimizealpha(pts)
-            poly = alphashape.alphashape(pts, alpha)
+            pts_cap = _sample_points(pts, MAX_POINTS_FOR_ENVELOPE)
+            alpha = alphashape.optimizealpha(pts_cap)
+            poly = alphashape.alphashape(pts_cap, alpha)
         except Exception:
             poly = None
+
     if poly is None:
         poly = sgeom.MultiPoint(pts).convex_hull
+
     try:
         if isinstance(poly, sgeom.MultiPolygon):
             poly = max(poly.geoms, key=lambda g: g.area)
         if isinstance(poly, sgeom.Polygon):
             x, y = poly.exterior.coords.xy
+            return np.column_stack([np.asarray(x), np.asarray(y)])
+        if isinstance(poly, sgeom.LineString):
+            x, y = poly.coords.xy
             return np.column_stack([np.asarray(x), np.asarray(y)])
     except Exception:
         pass
@@ -164,19 +201,31 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
 
 def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_pedestal: bool):
     fig = go.Figure()
-    if dense_xy.size:
-        fig.add_trace(go.Scatter(x=dense_xy[:, 0], y=dense_xy[:, 1],
-                                 mode="markers", marker=dict(size=4, symbol="diamond", opacity=0.5),
-                                 name="Interpolated points"))
+
+    # Show at most MAX_POINTS_FOR_DISPLAY to keep UI snappy
+    dense_for_plot = _sample_points(dense_xy, MAX_POINTS_FOR_DISPLAY)
+
+    if dense_for_plot.size:
+        fig.add_trace(go.Scatter(
+            x=dense_for_plot[:, 0], y=dense_for_plot[:, 1],
+            mode="markers",
+            marker=dict(size=4, symbol="diamond", opacity=0.5),
+            name="Interpolated points",
+        ))
     if orig_xy.size:
-        fig.add_trace(go.Scatter(x=orig_xy[:, 0],
-                                 y=orig_xy[:, 1] + (PEDESTAL_HEIGHT_M if include_pedestal else 0.0),
-                                 mode="markers", marker=dict(size=8),
-                                 name="Original matrix points"))
+        fig.add_trace(go.Scatter(
+            x=orig_xy[:, 0],
+            y=orig_xy[:, 1] + (PEDESTAL_HEIGHT_M if include_pedestal else 0.0),
+            mode="markers",
+            marker=dict(size=8),
+            name="Original matrix points",
+        ))
     if boundary_xy is not None and len(boundary_xy) > 2:
-        fig.add_trace(go.Scatter(x=boundary_xy[:, 0], y=boundary_xy[:, 1],
-                                 mode="lines", line=dict(width=3),
-                                 name="Envelope"))
+        fig.add_trace(go.Scatter(
+            x=boundary_xy[:, 0], y=boundary_xy[:, 1],
+            mode="lines", line=dict(width=3),
+            name="Envelope",
+        ))
 
     fig.update_layout(
         title="DCN Picasso DSV Engineering Data",
@@ -185,6 +234,7 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=40, r=20, t=60, b=40),
+        uirevision="keep",  # prevents re-draw jitter on callbacks
     )
     return fig
 
@@ -235,20 +285,26 @@ def create_app():
         dcc.Slider(id="slider-main-step", min=0.1, max=10, step=0.1, value=1.0,
                    tooltip={"placement": "bottom", "always_visible": True}),
         html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace"}),
+
         html.Label("Step between Folding-jib matrix angles (°)"),
         dcc.Slider(id="slider-fold-step", min=0.1, max=10, step=0.1, value=1.0,
                    tooltip={"placement": "bottom", "always_visible": True}),
         html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace"}),
 
-        dcc.Checklist(id="pedestal-toggle",
-                      options=[{"label": f"Include pedestal height (+{PEDESTAL_HEIGHT_M:.1f} m)", "value": "on"}],
-                      value=["on"], style={"marginTop": "10px"}),
+        dcc.Checklist(
+            id="pedestal-toggle",
+            options=[{"label": f"Include pedestal height (+{PEDESTAL_HEIGHT_M:.1f} m)", "value": "on"}],
+            value=["on"], style={"marginTop": "10px"}
+        ),
 
         html.Label("Envelope type"),
-        dcc.RadioItems(id="envelope-type",
-                       options=[{"label": "Concave (alpha shape)", "value": "concave"},
-                                {"label": "Convex hull", "value": "convex"}],
-                       value="concave", style={"marginTop": "5px"}),
+        dcc.RadioItems(
+            id="envelope-type",
+            options=[{"label": "Concave (alpha shape)", "value": "concave"},
+                     {"label": "Convex hull", "value": "convex"}],
+            value="convex",  # default to convex (stable & fast)
+            style={"marginTop": "5px"}
+        ),
 
         html.Button("Download interpolated CSV", id="btn-download", n_clicks=0, style={"marginTop": "10px"}),
         dcc.Download(id="download-data"),
@@ -303,18 +359,24 @@ def create_app():
                       orig_xy_store, fold_angles_store, main_angles_store):
         include_pedestal = "on" in (pedestal_value or [])
         prefer_concave = (envelope_value == "concave")
+
         _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
                                         d_fold=fold_step, d_main=main_step)
         H_dense = height_itp(pts)
         R_dense = outre_itp(pts)
         if include_pedestal:
             H_dense = H_dense + PEDESTAL_HEIGHT_M
+
         dense_xy = np.column_stack([R_dense, H_dense])
         dense_xy = dense_xy[~np.isnan(dense_xy).any(axis=1)]
-        if dense_xy.shape[0] > 50000:
-            dense_xy = dense_xy[::2]
-        boundary_xy = compute_boundary_curve(dense_xy, prefer_concave=prefer_concave)
-        return make_figure(np.array(orig_xy_store), dense_xy, boundary_xy, include_pedestal)
+
+        # Build the envelope on a capped subset (fast & stable)
+        envelope_xy = compute_boundary_curve(
+            _sample_points(dense_xy, MAX_POINTS_FOR_ENVELOPE),
+            prefer_concave=prefer_concave
+        )
+
+        return make_figure(np.array(orig_xy_store), dense_xy, envelope_xy, include_pedestal)
 
     # --- Download ---
     @app.callback(
