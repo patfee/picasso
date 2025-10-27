@@ -20,14 +20,12 @@ DATA_DIR = os.getenv("DATA_DIR", "./data")
 HEIGHT_CSV = os.getenv("HEIGHT_CSV", "height.csv")
 OUTREACH_CSV = os.getenv("OUTREACH_CSV", "outreach.csv")
 PEDESTAL_HEIGHT_M = float(os.getenv("PEDESTAL_HEIGHT_M", "6"))
-LOGO_URL = os.getenv(
-    "LOGO_URL",
-    "https://www.google.com/url?sa=i&url=https%3A%2F%2Fdcndiving.com%2F&psig=AOvVaw08weDg3_w7rLPAiYloISj5&ust=1761566373095000&source=images&cd=vfe&opi=89978449&ved=0CBUQjRxqFwoTCPj8qaPowZADFQAAAAAdAAAAABAE",
-)
+# Put your logo file at ./assets/dcn_logo.svg (Dash serves /assets/* automatically)
+LOGO_URL = os.getenv("LOGO_URL", "/assets/dcn_logo.svg")
 
-# Display/perf caps (tune if needed)
-MAX_POINTS_FOR_DISPLAY = 15000  # Plotly slows beyond ~20k markers
-MAX_POINTS_FOR_ENVELOPE = 8000  # alphashape gets heavy above this
+# Display/perf caps
+MAX_POINTS_FOR_DISPLAY = 15000
+MAX_POINTS_FOR_ENVELOPE = 8000
 
 
 # =========================
@@ -53,14 +51,8 @@ def _clean_angles(vals):
 
 
 def load_matrix_csv(path: str) -> pd.DataFrame:
-    """
-    Load matrix where:
-    - Columns = Main-jib angles
-    - Rows (index) = Folding-jib angles
-    """
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         raw = f.read()
-
     delim = _sniff_delimiter(raw[:4096])
 
     try:
@@ -86,12 +78,6 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
     df = df.dropna(how="all").dropna(axis=1, how="all")
     df = df.sort_index().sort_index(axis=1)
 
-    print(f"[load_matrix_csv] {os.path.basename(path)}: shape={df.shape}, delim='{delim}'")
-    if not df.empty:
-        print(
-            f"[load_matrix_csv] fold_angles={df.index.min()}..{df.index.max()} | "
-            f"main_angles={df.columns.min()}..{df.columns.max()}"
-        )
     if df.empty:
         raise ValueError(f"{path} parsed to empty DataFrame.")
     return df
@@ -123,7 +109,6 @@ def resample_grid(fold_angles, main_angles, d_fold: float, d_main: float):
 
 
 def _sample_points(arr: np.ndarray, max_n: int) -> np.ndarray:
-    """Uniformly downsample rows of arr (without replacement) to <= max_n."""
     n = len(arr)
     if n <= max_n:
         return arr
@@ -132,11 +117,6 @@ def _sample_points(arr: np.ndarray, max_n: int) -> np.ndarray:
 
 
 def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
-    """Robust envelope builder:
-    - Drop NaNs/dupes
-    - Detect near-1D clouds (singular); return convex hull/line
-    - Else try concave on a capped subset; fall back to convex hull
-    """
     if xy_points is None:
         return None
     pts = np.asarray(xy_points, dtype=float)
@@ -149,7 +129,7 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     if len(pts) < 3:
         return None
 
-    # detect near-collinearity (rank-1 or very ill-conditioned)
+    # detect near-collinearity
     centered = pts - pts.mean(axis=0)
     try:
         s = np.linalg.svd(centered, compute_uv=False)
@@ -157,7 +137,6 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     except Exception:
         near_1d = True
 
-    # If ~1-D, convex hull/line is the only stable output
     if near_1d:
         try:
             hull = sgeom.MultiPoint(pts).convex_hull
@@ -171,7 +150,6 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
         except Exception:
             return None
 
-    # Otherwise, attempt concave hull on a capped subset
     poly = None
     if prefer_concave:
         try:
@@ -201,7 +179,6 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
 def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_pedestal: bool):
     fig = go.Figure()
 
-    # Show at most MAX_POINTS_FOR_DISPLAY to keep UI snappy
     dense_for_plot = _sample_points(dense_xy, MAX_POINTS_FOR_DISPLAY)
 
     if dense_for_plot.size:
@@ -227,15 +204,26 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
         ))
 
     fig.update_layout(
-        title="DCN Picasso DSV Engineering Data",
+        # remove plot title (we have a page header) to avoid legend overlap
         xaxis_title="Outreach [m]",
         yaxis_title="Jib head height [m]" if include_pedestal else "Jib head above pedestal flange [m]",
         template="plotly_white",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        legend=dict(orientation="h", yanchor="top", y=1.02, xanchor="left", x=0),
         margin=dict(l=40, r=20, t=60, b=40),
-        uirevision="keep",  # prevents re-draw jitter on callbacks
+        uirevision="keep",
     )
     return fig
+
+
+# ---------- helper to build tidy slider marks (min / mid / max only)
+def _three_marks(vmin: float, vmax: float, unit: str):
+    mid = (vmin + vmax) / 2.0
+    style = {"fontSize": "12px", "color": "#555"}
+    return {
+        round(vmin, 2): {"label": f"{vmin:g}{unit}", "style": style},
+        round(mid, 2): {"label": f"{mid:g}{unit}", "style": style},
+        round(vmax, 2): {"label": f"{vmax:g}{unit}", "style": style},
+    }
 
 
 # =========================
@@ -251,6 +239,10 @@ def create_app():
     outreach_df = load_matrix_csv(os.path.join(DATA_DIR, OUTREACH_CSV))
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
+
+    # --- Slider mark domains (for readability; marks are static)
+    step_min, step_max = 0.1, 10.0
+    step_marks = _three_marks(step_min, step_max, "°")
 
     # --- Shared Stores ---
     stores = html.Div([
@@ -274,34 +266,42 @@ def create_app():
     header = html.Div([
         html.H2("DCN Picasso DSV Engineering Data", style={"margin": 0}),
         html.Img(src=LOGO_URL,
-                 style={"height": "42px", "objectFit": "contain", "position": "absolute", "right": "16px", "top": "12px"},
+                 loading="lazy",
+                 style={"height": "42px", "objectFit": "contain", "position": "absolute",
+                        "right": "16px", "top": "12px"},
                  alt="DCN Diving logo"),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
     # --- Envelope Page (controls + graph in two columns) ---
     envelope_controls = html.Div([
-        html.Label("Step between Main-jib matrix angles (°)"),
-        dcc.Slider(id="slider-main-step", min=0.1, max=10, step=0.1, value=1.0,
-                   tooltip={"placement": "bottom", "always_visible": True}),
-        html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace"}),
+        html.Label("Step between Main-jib matrix angles (°)", style={"fontWeight": 600}),
+        dcc.Slider(
+            id="slider-main-step", min=step_min, max=step_max, step=0.1, value=1.0,
+            marks=step_marks, included=False, updatemode="mouseup",
+            tooltip={"placement": "bottom", "always_visible": False},
+        ),
+        html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
 
-        html.Label("Step between Folding-jib matrix angles (°)"),
-        dcc.Slider(id="slider-fold-step", min=0.1, max=10, step=0.1, value=1.0,
-                   tooltip={"placement": "bottom", "always_visible": True}),
-        html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace"}),
+        html.Label("Step between Folding-jib matrix angles (°)", style={"fontWeight": 600, "marginTop": "10px"}),
+        dcc.Slider(
+            id="slider-fold-step", min=step_min, max=step_max, step=0.1, value=1.0,
+            marks=step_marks, included=False, updatemode="mouseup",
+            tooltip={"placement": "bottom", "always_visible": False},
+        ),
+        html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
 
         dcc.Checklist(
             id="pedestal-toggle",
             options=[{"label": f"Include pedestal height (+{PEDESTAL_HEIGHT_M:.1f} m)", "value": "on"}],
-            value=["on"], style={"marginTop": "10px"}
+            value=["on"], style={"marginTop": "12px"}
         ),
 
-        html.Label("Envelope type"),
+        html.Label("Envelope type", style={"fontWeight": 600, "marginTop": "6px"}),
         dcc.RadioItems(
             id="envelope-type",
             options=[{"label": "Concave (alpha shape)", "value": "concave"},
                      {"label": "Convex hull", "value": "convex"}],
-            value="convex",  # default to convex (stable & fast)
+            value="convex",
             style={"marginTop": "5px"}
         ),
 
@@ -312,10 +312,10 @@ def create_app():
         ], style={"position": "sticky", "bottom": 0, "background": "#fafafa", "padding": "8px 0"}),
 
     ], style={
-        "flex": "0 0 320px",
+        "flex": "0 0 340px",
         "overflowY": "auto",
         "height": "78vh",
-        "paddingRight": "10px",
+        "paddingRight": "12px",
         "borderRight": "1px solid #eee"
     })
 
@@ -387,7 +387,6 @@ def create_app():
         dense_xy = np.column_stack([R_dense, H_dense])
         dense_xy = dense_xy[~np.isnan(dense_xy).any(axis=1)]
 
-        # Build the envelope on a capped subset (fast & stable)
         envelope_xy = compute_boundary_curve(
             _sample_points(dense_xy, MAX_POINTS_FOR_ENVELOPE),
             prefer_concave=prefer_concave
