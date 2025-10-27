@@ -137,15 +137,14 @@ def _estimate_alpha(pts: np.ndarray, k: int = KNN_K) -> float:
     if len(pts) < k + 2:
         return 1.0
 
-    # pairwise distances (vectorised, manageable for <= ~1500 points)
     A = pts[:, None, :] - pts[None, :, :]
     D = np.sqrt((A ** 2).sum(axis=2))
-    D.sort(axis=1)  # row-wise sort; D[:, 0] == 0 (self)
-    dk = np.median(D[:, k])  # median k-th neighbour distance
+    D.sort(axis=1)
+    dk = np.median(D[:, k])
     if not np.isfinite(dk) or dk <= 1e-9:
         return 1.0
 
-    c = 1.8  # tune: larger c -> looser hull; smaller -> tighter
+    c = 1.8
     return 1.0 / (c * dk)
 
 
@@ -157,12 +156,10 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     if len(pts) < 3:
         return None
 
-    # dedupe
     pts = np.unique(pts, axis=0)
     if len(pts) < 3:
         return None
 
-    # near-1D? -> convex/line only
     if _near_collinear(pts):
         try:
             hull = sgeom.MultiPoint(pts).convex_hull
@@ -176,7 +173,6 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
         except Exception:
             return None
 
-    # Concave (fast) on a capped subset using heuristic alpha
     poly = None
     if prefer_concave:
         try:
@@ -186,7 +182,6 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
         except Exception:
             poly = None
 
-    # Fallback: convex hull (fast & robust)
     if poly is None:
         poly = sgeom.MultiPoint(pts).convex_hull
 
@@ -241,7 +236,6 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
     return fig
 
 
-# ---------- slider marks (min / mid / max)
 def _three_marks(vmin: float, vmax: float, unit: str):
     mid = (vmin + vmax) / 2.0
     style = {"fontSize": "12px", "color": "#555"}
@@ -291,11 +285,12 @@ def create_app():
     # Header
     header = html.Div([
         html.H2("DCN Picasso DSV Engineering Data", style={"margin": 0}),
-        html.Img(src=LOGO_URL,
-                 loading="lazy",
-                 style={"height": "42px", "objectFit": "contain", "position": "absolute",
-                        "right": "16px", "top": "12px"},
-                 alt="DCN Diving logo"),
+        html.Img(
+            src=LOGO_URL,
+            style={"height": "42px", "objectFit": "contain", "position": "absolute",
+                   "right": "16px", "top": "12px"},
+            alt="DCN Diving logo",
+        ),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
     # Controls
