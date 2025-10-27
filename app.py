@@ -12,7 +12,6 @@ import plotly.graph_objects as go
 from scipy.interpolate import RegularGridInterpolator
 import shapely.geometry as sgeom
 import alphashape
-from numpy.linalg import matrix_rank
 
 # =========================
 # Config
@@ -279,7 +278,7 @@ def create_app():
                  alt="DCN Diving logo"),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
-    # --- Envelope Page ---
+    # --- Envelope Page (controls + graph in two columns) ---
     envelope_controls = html.Div([
         html.Label("Step between Main-jib matrix angles (°)"),
         dcc.Slider(id="slider-main-step", min=0.1, max=10, step=0.1, value=1.0,
@@ -306,12 +305,30 @@ def create_app():
             style={"marginTop": "5px"}
         ),
 
-        html.Button("Download interpolated CSV", id="btn-download", n_clicks=0, style={"marginTop": "10px"}),
-        dcc.Download(id="download-data"),
-    ], style={"marginBottom": "12px"})
+        html.Div([
+            html.Button("Download interpolated CSV", id="btn-download", n_clicks=0,
+                        style={"marginTop": "10px", "width": "100%"}),
+            dcc.Download(id="download-data"),
+        ], style={"position": "sticky", "bottom": 0, "background": "#fafafa", "padding": "8px 0"}),
 
-    envelope_graph = dcc.Graph(id="graph", style={"height": "78vh"})
-    envelope_page = html.Div([envelope_controls, envelope_graph], style={"padding": "16px"})
+    ], style={
+        "flex": "0 0 320px",
+        "overflowY": "auto",
+        "height": "78vh",
+        "paddingRight": "10px",
+        "borderRight": "1px solid #eee"
+    })
+
+    envelope_graph = html.Div(
+        dcc.Graph(id="graph", style={"height": "78vh"}),
+        style={"flex": "1 1 auto", "paddingLeft": "16px"}
+    )
+
+    envelope_page = html.Div(
+        [envelope_controls, envelope_graph],
+        style={"display": "flex", "padding": "16px", "gap": "10px"}
+    )
+
     test_page = html.Div([html.H3("Test Page"), html.P("Placeholder for future content.")], style={"padding": "16px"})
     content = html.Div(id="page-content", style={"width": "100%"})
 
