@@ -6,7 +6,7 @@ import pandas as pd
 
 from flask import Flask
 import dash
-from dash import dcc, html, Input, Output, State
+from dash import dcc, html, Input, Output, State, dash_table
 import plotly.graph_objects as go
 
 from scipy.interpolate import RegularGridInterpolator
@@ -255,6 +255,33 @@ def _three_marks(vmin: float, vmax: float, unit: str):
     }
 
 
+def df_to_dash_table(df: pd.DataFrame, title: str, table_id: str):
+    """
+    Render a DataTable with folding angles as first column and main-angle columns.
+    """
+    # Build a display DataFrame with index as first column
+    display_df = df.copy()
+    display_df.index.name = "Folding°"
+    display_df = display_df.reset_index()
+
+    # Convert all column headers to strings to avoid id issues
+    columns = [{"name": str(c), "id": str(c)} for c in display_df.columns]
+    data = display_df.rename(columns=str).to_dict("records")
+
+    return html.Div([
+        html.H4(title, style={"margin": "12px 0 6px 0"}),
+        dash_table.DataTable(
+            id=table_id,
+            columns=columns,
+            data=data,
+            page_size=25,
+            style_table={"overflowX": "auto", "border": "1px solid #eee"},
+            style_cell={"padding": "6px", "fontFamily": "monospace", "fontSize": "12px"},
+            style_header={"fontWeight": "600", "backgroundColor": "#f6f6f6"},
+        ),
+    ])
+
+
 # =========================
 # App Factory (multi-page)
 # =========================
@@ -355,9 +382,21 @@ def create_app():
         "borderRight": "1px solid #eee"
     })
 
-    # Graph
+    # Graph + tables area
     envelope_graph = html.Div(
-        dcc.Graph(id="graph", style={"height": "78vh"}),
+        [
+            dcc.Graph(id="graph", style={"height": "78vh"}),
+            # --- Matrices underneath the curve ---
+            html.Div([
+                df_to_dash_table(height_df, "Reference Matrix — Height [m]", "tbl-height"),
+                html.Button("Download Height CSV", id="btn-height-csv", style={"margin": "8px 0 24px 0"}),
+                dcc.Download(id="download-height"),
+
+                df_to_dash_table(outreach_df, "Reference Matrix — Outreach [m]", "tbl-outreach"),
+                html.Button("Download Outreach CSV", id="btn-outreach-csv", style={"margin": "8px 0 0 0"}),
+                dcc.Download(id="download-outreach"),
+            ], style={"marginTop": "16px"})
+        ],
         style={"flex": "1 1 auto", "paddingLeft": "16px"}
     )
 
@@ -454,7 +493,7 @@ def create_app():
 
         return make_figure(np.array(orig_xy_store), dense_xy, envelope_xy, include_pedestal)
 
-    # Download
+    # Download interpolated grid
     @app.callback(
         Output("download-data", "data"),
         Input("btn-download", "n_clicks"),
@@ -484,6 +523,15 @@ def create_app():
         }).dropna()
         csv_bytes = df_out.to_csv(index=False).encode("utf-8")
         return dcc.send_bytes(lambda b: b.write(csv_bytes), filename="interpolated_envelope.csv")
+
+    # Download original matrices
+    @app.callback(Output("download-height", "data"), Input("btn-height-csv", "n_clicks"), prevent_initial_call=True)
+    def download_height_matrix(n):
+        return dcc.send_data_frame(height_df.to_csv, "height_matrix.csv")
+
+    @app.callback(Output("download-outreach", "data"), Input("btn-outreach-csv", "n_clicks"), prevent_initial_call=True)
+    def download_outreach_matrix(n):
+        return dcc.send_data_frame(outreach_df.to_csv, "outreach_matrix.csv")
 
     return app, server
 
