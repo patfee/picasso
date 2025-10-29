@@ -1,16 +1,6 @@
-/* Make sliders thinner and reduce handle size */
-.thin-slider .rc-slider {
-  height: 8px;
-}
-.thin-slider .rc-slider-rail {
-  height: 8px;
-}
-.thin-slider .rc-slider-track {
-  height: 8px;
-}
+.thin-slider .rc-slider { height: 8px; }
+.thin-slider .rc-slider-rail,
+.thin-slider .rc-slider-track { height: 8px; }
 .thin-slider .rc-slider-handle {
-  width: 14px;
-  height: 14px;
-  margin-top: -3px; /* center handle on 8px rail */
-  border-width: 1px;
+  width: 14px; height: 14px; margin-top: -3px; border-width: 1px;
 }
