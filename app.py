@@ -186,10 +186,14 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
 # Plot utilities
 # =========================
 def make_heatmap(df: pd.DataFrame, title: str, colorscale="Viridis"):
+    """Render a matrix as a heatmap for visualizing input data."""
     fig = go.Figure(
         data=go.Heatmap(
-            z=df.values, x=df.columns, y=df.index,
-            colorscale=colorscale, colorbar=dict(title=title),
+            z=df.values,
+            x=df.columns,
+            y=df.index,
+            colorscale=colorscale,
+            colorbar=dict(title=title),
         )
     )
     fig.update_layout(
@@ -209,14 +213,16 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
     if dense_for_plot.size:
         fig.add_trace(go.Scatter(
             x=dense_for_plot[:, 0], y=dense_for_plot[:, 1],
-            mode="markers", marker=dict(size=4, symbol="diamond", opacity=0.5),
+            mode="markers",
+            marker=dict(size=4, symbol="diamond", opacity=0.5),
             name="Interpolated points",
         ))
     if orig_xy.size:
         fig.add_trace(go.Scatter(
             x=orig_xy[:, 0],
             y=orig_xy[:, 1] + (PEDESTAL_HEIGHT_M if include_pedestal else 0.0),
-            mode="markers", marker=dict(size=8),
+            mode="markers",
+            marker=dict(size=8),
             name="Original matrix points",
         ))
     if boundary_xy is not None and len(boundary_xy) > 2:
@@ -237,6 +243,16 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
     return fig
 
 
+def _three_marks(vmin: float, vmax: float, unit: str):
+    mid = (vmin + vmax) / 2.0
+    style = {"fontSize": "12px", "color": "#555"}
+    return {
+        round(vmin, 2): {"label": f"{vmin:g}{unit}", "style": style},
+        round(mid,  2): {"label": f"{mid:g}{unit}",  "style": style},
+        round(vmax, 2): {"label": f"{vmax:g}{unit}", "style": style},
+    }
+
+
 # =========================
 # App Factory (multi-page)
 # =========================
@@ -245,54 +261,135 @@ def create_app():
     app = dash.Dash(__name__, server=server, suppress_callback_exceptions=True,
                     title="DCN Picasso DSV Engineering Data")
 
-    # Load matrices
+    # Load data
     height_df = load_matrix_csv(os.path.join(DATA_DIR, HEIGHT_CSV))
     outreach_df = load_matrix_csv(os.path.join(DATA_DIR, OUTREACH_CSV))
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
 
-    # Layout
-    matrix_block = html.Div([
-        html.H4("Original Matrices", style={"marginTop": "12px"}),
-        html.Div([
-            html.Div([
-                dcc.Graph(figure=make_heatmap(height_df, "Height [m]"), id="height-matrix"),
-                html.Button("Download Height CSV", id="btn-height-csv", style={"marginTop": "8px"}),
-                dcc.Download(id="download-height"),
-            ], style={"width": "50%", "display": "inline-block", "verticalAlign": "top"}),
+    step_min, step_max = 0.1, 10.0
+    step_marks = _three_marks(step_min, step_max, "°")
 
-            html.Div([
-                dcc.Graph(figure=make_heatmap(outreach_df, "Outreach [m]"), id="outreach-matrix"),
-                html.Button("Download Outreach CSV", id="btn-outreach-csv", style={"marginTop": "8px"}),
-                dcc.Download(id="download-outreach"),
-            ], style={"width": "50%", "display": "inline-block", "verticalAlign": "top"}),
-        ]),
-    ], style={"marginTop": "20px"})
-
-    main_graph = dcc.Graph(id="graph", style={"height": "78vh"})
-
-    app.layout = html.Div([
-        html.H2("DCN Picasso DSV Crane Envelope Viewer"),
-        main_graph,
-        matrix_block
+    stores = html.Div([
+        dcc.Store(id="orig-xy", data=orig_xy.tolist()),
+        dcc.Store(id="fold-angles", data=fold_angles.tolist()),
+        dcc.Store(id="main-angles", data=main_angles.tolist()),
     ])
 
-    # --- CSV download callbacks
-    @app.callback(Output("download-height", "data"), Input("btn-height-csv", "n_clicks"), prevent_initial_call=True)
-    def download_height(n):
-        return dcc.send_data_frame(height_df.to_csv, "height_matrix.csv")
+    sidebar = html.Div([
+        html.H3("Menu", style={"marginTop": 0}),
+        dcc.Link("140T main hoist envelope", href="/envelope", className="nav-link"),
+        html.Br(),
+        dcc.Link("Test", href="/test", className="nav-link"),
+    ], style={"position": "sticky", "top": "0px", "height": "100vh",
+              "padding": "16px", "borderRight": "1px solid #e5e7eb", "background": "#fafafa"})
 
-    @app.callback(Output("download-outreach", "data"), Input("btn-outreach-csv", "n_clicks"), prevent_initial_call=True)
-    def download_outreach(n):
-        return dcc.send_data_frame(outreach_df.to_csv, "outreach_matrix.csv")
+    header = html.Div([
+        html.H2("DCN Picasso DSV Engineering Data", style={"margin": 0}),
+        html.Img(src=LOGO_URL,
+                 style={"height": "42px", "objectFit": "contain",
+                        "position": "absolute", "right": "16px", "top": "12px"},
+                 alt="DCN Diving logo"),
+    ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
+
+    envelope_controls = html.Div([
+        html.Label("Step between Main-jib matrix angles (°)", style={"fontWeight": 600}),
+        dcc.Slider(id="slider-main-step", min=step_min, max=step_max, step=0.1, value=1.0,
+                   marks=step_marks, included=False, updatemode="mouseup",
+                   tooltip={"placement": "bottom", "always_visible": False}),
+        html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
+
+        html.Label("Step between Folding-jib matrix angles (°)", style={"fontWeight": 600, "marginTop": "10px"}),
+        dcc.Slider(id="slider-fold-step", min=step_min, max=step_max, step=0.1, value=1.0,
+                   marks=step_marks, included=False, updatemode="mouseup",
+                   tooltip={"placement": "bottom", "always_visible": False}),
+        html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
+
+        dcc.Checklist(id="pedestal-toggle",
+                      options=[{"label": f"Include pedestal height (+{PEDESTAL_HEIGHT_M:.1f} m)", "value": "on"}],
+                      value=["on"], style={"marginTop": "12px"}),
+
+        html.Label("Envelope type", style={"fontWeight": 600, "marginTop": "6px"}),
+        dcc.RadioItems(
+            id="envelope-type",
+            options=[{"label": "Concave (fast approx)", "value": "concave"},
+                     {"label": "Convex hull (fast, stable)", "value": "convex"}],
+            value="convex",
+            style={"marginTop": "5px"}
+        ),
+
+        html.Div(
+            id="envelope-help",
+            style={"marginTop": "6px", "fontSize": "12px", "color": "#555", "lineHeight": "1.35"}
+        ),
+
+        html.Div([
+            html.Button("Download interpolated CSV", id="btn-download", n_clicks=0,
+                        style={"marginTop": "10px", "width": "100%"}),
+            dcc.Download(id="download-data"),
+        ], style={"position": "sticky", "bottom": 0, "background": "#fafafa", "padding": "8px 0"}),
+
+    ], style={"flex": "0 0 340px", "overflowY": "auto", "height": "78vh",
+              "paddingRight": "12px", "borderRight": "1px solid #eee"})
+
+    # Graph + Matrices
+    envelope_graph = html.Div([
+        dcc.Graph(id="graph", style={"height": "78vh"}),
+        html.Div([
+            html.H4("Original Matrices", style={"marginTop": "12px"}),
+            html.Div([
+                html.Div([dcc.Graph(id="height-matrix", figure=make_heatmap(height_df, "Height [m]"))],
+                         style={"width": "50%", "display": "inline-block", "verticalAlign": "top"}),
+                html.Div([dcc.Graph(id="outreach-matrix", figure=make_heatmap(outreach_df, "Outreach [m]"))],
+                         style={"width": "50%", "display": "inline-block", "verticalAlign": "top"}),
+            ]),
+        ], style={"marginTop": "20px"})
+    ], style={"flex": "1 1 auto", "paddingLeft": "16px"})
+
+    envelope_page = html.Div(
+        [envelope_controls, envelope_graph],
+        style={"display": "flex", "padding": "16px", "gap": "10px"}
+    )
+
+    test_page = html.Div([html.H3("Test Page"), html.P("Placeholder for future content.")],
+                         style={"padding": "16px"})
+    content = html.Div(id="page-content", style={"width": "100%"})
+
+    app.layout = html.Div([
+        dcc.Location(id="url"), stores, header,
+        html.Div([
+            html.Div(sidebar, style={"width": "260px", "flex": "0 0 260px"}),
+            html.Div(content, style={"flex": "1 1 auto"}),
+        ], style={"display": "flex", "gap": "0px"}),
+    ])
+
+    # Routing
+    @app.callback(Output("page-content", "children"), Input("url", "pathname"))
+    def route(pathname: str):
+        if pathname in ("/", "/envelope", None):
+            return envelope_page
+        elif pathname == "/test":
+            return test_page
+        return html.Div([html.H3("404"), html.P(f"Path not found: {pathname}")], style={"padding": "16px"})
+
+    # Envelope text helper
+    @app.callback(Output("envelope-help", "children"), Input("envelope-type", "value"))
+    def explain_envelope(kind):
+        if kind == "concave":
+            return html.Div([
+                html.B("Concave (alpha shape): "),
+                html.Span("Follows the inner curves of the dataset. More accurate but sensitive to noise or sparse points.")
+            ])
+        return html.Div([
+            html.B("Convex hull: "),
+            html.Span("Encloses all points in a smooth convex shape. Fast and robust, but can overestimate the area.")
+        ])
 
     return app, server
 
 
-# =========================
 # Entrypoint
-# =========================
 app, server = create_app()
 
 if __name__ == "__main__":
-    app.run_server(host="0.0.0.0", port=int(os.getenv("PORT", 3000)), debug=True)
+    app.run_server(host="0.0.0.0", port=int(os.getenv("PORT", 300
