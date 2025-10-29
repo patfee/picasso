@@ -6,13 +6,12 @@ import pandas as pd
 
 from flask import Flask
 import dash
-from dash import dcc, html, Input, Output, State, dash_table
+from dash import dcc, html, Input, Output, State, dash_table, no_update
 import plotly.graph_objects as go
 
 from scipy.interpolate import RegularGridInterpolator
 import shapely.geometry as sgeom
 import alphashape
-
 
 # =========================
 # Config
@@ -21,15 +20,12 @@ DATA_DIR = os.getenv("DATA_DIR", "./data")
 HEIGHT_CSV = os.getenv("HEIGHT_CSV", "height.csv")
 OUTREACH_CSV = os.getenv("OUTREACH_CSV", "outreach.csv")
 PEDESTAL_HEIGHT_M = float(os.getenv("PEDESTAL_HEIGHT_M", "6"))
-# Serve a local asset for reliability (put your file at ./assets/dcn_logo.svg)
 LOGO_URL = os.getenv("LOGO_URL", "/assets/dcn_logo.svg")
 
-# Display/perf caps
-MAX_POINTS_FOR_DISPLAY  = 15000   # Plotly drawing cap
-MAX_POINTS_FOR_ENVELOPE = 6000    # Geometry calc subset cap (lower = faster)
-MAX_POINTS_FOR_KNN      = 1200    # Subset size for alpha estimation
-KNN_K                   = 8        # Neighbour count for distance heuristic
-
+MAX_POINTS_FOR_DISPLAY  = 15000
+MAX_POINTS_FOR_ENVELOPE = 6000
+MAX_POINTS_FOR_KNN      = 1200
+KNN_K                   = 8
 
 # =========================
 # CSV Loading
@@ -39,7 +35,6 @@ def _sniff_delimiter(sample: str) -> str:
         return csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t"]).delimiter
     except Exception:
         return ";"
-
 
 def _clean_angles(vals):
     cleaned = (
@@ -52,16 +47,9 @@ def _clean_angles(vals):
     )
     return pd.to_numeric(cleaned, errors="coerce")
 
-
 def load_matrix_csv(path: str) -> pd.DataFrame:
-    """
-    Load matrix where:
-    - Columns = Main-jib angles
-    - Rows (index) = Folding-jib angles
-    """
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         raw = f.read()
-
     delim = _sniff_delimiter(raw[:4096])
 
     try:
@@ -70,8 +58,7 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
         df = pd.read_csv(io.StringIO(raw), sep=delim, engine="python")
         first_col = df.columns[0]
         if (
-            first_col.lower().strip()
-            in {"", "unnamed: 0", "foldingjib", "fold", "fold_angle", "folding"}
+            first_col.lower().strip() in {"", "unnamed: 0", "foldingjib", "fold", "fold_angle", "folding"}
             or df[first_col]
             .dropna()
             .astype(str)
@@ -90,7 +77,6 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
         raise ValueError(f"{path} parsed to empty DataFrame.")
     return df
 
-
 # =========================
 # Interpolation & Geometry
 # =========================
@@ -105,18 +91,15 @@ def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame):
                                          bounds_error=False, fill_value=None)
     return fold_angles, main_angles, height_itp, outre_itp
 
-
 def resample_grid(fold_angles, main_angles, d_fold: float, d_main: float):
     fmin, fmax = float(np.min(fold_angles)), float(np.max(fold_angles))
     mmin, mmax = float(np.min(main_angles)), float(np.max(main_angles))
-    d_fold, d_main = max(0.1, d_fold), max(0.1, d_main)
-
+    d_fold, d_main = max(0.5, d_fold), max(0.5, d_main)
     fnew = np.arange(fmin, fmax + 1e-9, d_fold)
     mnew = np.arange(mmin, mmax + 1e-9, d_main)
     F, M = np.meshgrid(fnew, mnew, indexing="ij")
     pts = np.column_stack([F.ravel(), M.ravel()])
     return fnew, mnew, F, M, pts
-
 
 def _sample_points(arr: np.ndarray, max_n: int) -> np.ndarray:
     n = len(arr)
@@ -124,7 +107,6 @@ def _sample_points(arr: np.ndarray, max_n: int) -> np.ndarray:
         return arr
     idx = np.linspace(0, n - 1, num=max_n, dtype=int)
     return arr[idx]
-
 
 def _near_collinear(pts: np.ndarray) -> bool:
     centered = pts - pts.mean(axis=0)
@@ -134,28 +116,18 @@ def _near_collinear(pts: np.ndarray) -> bool:
     except Exception:
         return True
 
-
 def _estimate_alpha(pts: np.ndarray, k: int = KNN_K) -> float:
-    """
-    Fast heuristic alpha:
-    - take up to MAX_POINTS_FOR_KNN points
-    - compute median distance to k-th nearest neighbour
-    - alpha ~ 1 / (c * d_k), with c chosen to produce a tight but robust hull
-    """
     pts = _sample_points(pts, MAX_POINTS_FOR_KNN)
     if len(pts) < k + 2:
         return 1.0
-
     A = pts[:, None, :] - pts[None, :, :]
     D = np.sqrt((A ** 2).sum(axis=2))
     D.sort(axis=1)
     dk = np.median(D[:, k])
     if not np.isfinite(dk) or dk <= 1e-9:
         return 1.0
-
     c = 1.8
     return 1.0 / (c * dk)
-
 
 def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     if xy_points is None:
@@ -164,11 +136,9 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     pts = pts[~np.isnan(pts).any(axis=1)]
     if len(pts) < 3:
         return None
-
     pts = np.unique(pts, axis=0)
     if len(pts) < 3:
         return None
-
     if _near_collinear(pts):
         try:
             hull = sgeom.MultiPoint(pts).convex_hull
@@ -181,7 +151,6 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
             return None
         except Exception:
             return None
-
     poly = None
     if prefer_concave:
         try:
@@ -190,10 +159,8 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
             poly = alphashape.alphashape(pts_cap, alpha)
         except Exception:
             poly = None
-
     if poly is None:
         poly = sgeom.MultiPoint(pts).convex_hull
-
     try:
         if isinstance(poly, sgeom.MultiPolygon):
             poly = max(poly.geoms, key=lambda g: g.area)
@@ -206,7 +173,6 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     except Exception:
         pass
     return None
-
 
 def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_pedestal: bool):
     fig = go.Figure()
@@ -244,30 +210,21 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
     )
     return fig
 
-
 def _three_marks(vmin: float, vmax: float, unit: str):
     mid = (vmin + vmax) / 2.0
-    style = {"fontSize": "12px", "color": "#555"}
+    style = {"fontSize": "11px", "color": "#555"}
     return {
         round(vmin, 2): {"label": f"{vmin:g}{unit}", "style": style},
         round(mid,  2): {"label": f"{mid:g}{unit}",  "style": style},
         round(vmax, 2): {"label": f"{vmax:g}{unit}", "style": style},
     }
 
-
 def df_to_dash_table(df: pd.DataFrame, title: str, table_id: str):
-    """
-    Render a DataTable with folding angles as first column and main-angle columns.
-    """
-    # Build a display DataFrame with index as first column
     display_df = df.copy()
     display_df.index.name = "Folding°"
     display_df = display_df.reset_index()
-
-    # Convert all column headers to strings to avoid id issues
     columns = [{"name": str(c), "id": str(c)} for c in display_df.columns]
     data = display_df.rename(columns=str).to_dict("records")
-
     return html.Div([
         html.H4(title, style={"margin": "12px 0 6px 0"}),
         dash_table.DataTable(
@@ -281,26 +238,21 @@ def df_to_dash_table(df: pd.DataFrame, title: str, table_id: str):
         ),
     ])
 
-
 # =========================
-# App Factory (multi-page)
+# App Factory
 # =========================
 def create_app():
     server = Flask(__name__)
     app = dash.Dash(__name__, server=server, suppress_callback_exceptions=True,
                     title="DCN Picasso DSV Engineering Data")
 
-    # Load data
+    # Data
     height_df = load_matrix_csv(os.path.join(DATA_DIR, HEIGHT_CSV))
     outreach_df = load_matrix_csv(os.path.join(DATA_DIR, OUTREACH_CSV))
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
 
-    # Slider marks
-    step_min, step_max = 0.1, 10.0
-    step_marks = _three_marks(step_min, step_max, "°")
-
-    # Shared Stores
+    # Stores
     stores = html.Div([
         dcc.Store(id="orig-xy", data=orig_xy.tolist()),
         dcc.Store(id="fold-angles", data=fold_angles.tolist()),
@@ -329,23 +281,31 @@ def create_app():
         ),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
-    # Controls
+    # ====== Controls (compact sliders + inputs) ======
+    def slider_row(slider_id, input_id):
+        return html.Div([
+            dcc.Slider(
+                id=slider_id, min=0.5, max=5.0, step=0.1, value=1.0,
+                included=False, updatemode="mouseup",
+                marks=_three_marks(0.5, 5.0, "°"),
+                tooltip={"placement": "bottom", "always_visible": False},
+                style={"flex": "1 1 auto", "marginRight": "10px", "height": "24px"}
+            ),
+            dcc.Input(
+                id=input_id, type="number", value=1.0,
+                min=0.5, max=5.0, step=0.1,
+                style={"width": "90px", "height": "28px", "fontFamily": "monospace"}
+            ),
+        ], style={"display": "flex", "alignItems": "center", "gap": "6px", "marginBottom": "6px"})
+
     envelope_controls = html.Div([
         html.Label("Step between Main-jib matrix angles (°)", style={"fontWeight": 600}),
-        dcc.Slider(
-            id="slider-main-step", min=step_min, max=step_max, step=0.1, value=1.0,
-            marks=step_marks, included=False, updatemode="mouseup",
-            tooltip={"placement": "bottom", "always_visible": False},
-        ),
-        html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
+        slider_row("slider-main-step", "input-main-step"),
+        html.Div(id="main-range", style={"marginTop": "2px", "fontFamily": "monospace", "color": "#444"}),
 
         html.Label("Step between Folding-jib matrix angles (°)", style={"fontWeight": 600, "marginTop": "10px"}),
-        dcc.Slider(
-            id="slider-fold-step", min=step_min, max=step_max, step=0.1, value=1.0,
-            marks=step_marks, included=False, updatemode="mouseup",
-            tooltip={"placement": "bottom", "always_visible": False},
-        ),
-        html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
+        slider_row("slider-fold-step", "input-fold-step"),
+        html.Div(id="fold-range", style={"marginTop": "2px", "fontFamily": "monospace", "color": "#444"}),
 
         dcc.Checklist(
             id="pedestal-toggle",
@@ -362,11 +322,8 @@ def create_app():
             style={"marginTop": "5px"}
         ),
 
-        # ⬇️ Explanatory context under the toggle
-        html.Div(
-            id="envelope-help",
-            style={"marginTop": "6px", "fontSize": "12px", "color": "#555", "lineHeight": "1.35"}
-        ),
+        html.Div(id="envelope-help",
+                 style={"marginTop": "6px", "fontSize": "12px", "color": "#555", "lineHeight": "1.35"}),
 
         html.Div([
             html.Button("Download interpolated CSV", id="btn-download", n_clicks=0,
@@ -386,7 +343,6 @@ def create_app():
     envelope_graph = html.Div(
         [
             dcc.Graph(id="graph", style={"height": "78vh"}),
-            # --- Matrices underneath the curve ---
             html.Div([
                 df_to_dash_table(height_df, "Reference Matrix — Height [m]", "tbl-height"),
                 html.Button("Download Height CSV", id="btn-height-csv", style={"margin": "8px 0 24px 0"}),
@@ -437,34 +393,97 @@ def create_app():
         return (f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}°",
                 f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}°")
 
-    # Envelope type explanation
-    @app.callback(
-        Output("envelope-help", "children"),
-        Input("envelope-type", "value"),
-    )
+    # Explain envelope type
+    @app.callback(Output("envelope-help", "children"), Input("envelope-type", "value"))
     def explain_envelope(kind):
         if kind == "concave":
             return html.Div([
                 html.B("Concave (alpha shape): "),
-                html.Span(
-                    "Tightly wraps the points and follows inward bends (concavities). "
-                    "Captures a closer 'true' working envelope but can be sensitive to gaps/noise. "
-                    "Here it uses a fast approximation with sub-sampling."
-                )
+                html.Span("Tightly wraps the points and follows inward bends. Closer to 'true' envelope; more sensitive.")
             ])
         return html.Div([
             html.B("Convex hull: "),
-            html.Span(
-                "Smallest convex polygon enclosing all points. Ignores concavities, "
-                "so it usually overestimates area (conservative), but it’s very fast and stable."
-            )
+            html.Span("Smallest convex polygon enclosing all points. Ignores concavities; fast and stable.")
         ])
 
-    # Graph update
+    # --- Dynamic bounds for step controls (min=0.5, max=angle span) ---
+    @app.callback(
+        Output("slider-main-step", "min"),
+        Output("slider-main-step", "max"),
+        Output("slider-main-step", "marks"),
+        Output("input-main-step", "min"),
+        Output("input-main-step", "max"),
+        Output("slider-fold-step", "min"),
+        Output("slider-fold-step", "max"),
+        Output("slider-fold-step", "marks"),
+        Output("input-fold-step", "min"),
+        Output("input-fold-step", "max"),
+        Input("main-angles", "data"),
+        Input("fold-angles", "data"),
+    )
+    def update_step_bounds(main_angles_store, fold_angles_store):
+        m = np.array(main_angles_store, float)
+        f = np.array(fold_angles_store, float)
+        m_span = max(0.5, float(m.max() - m.min()))
+        f_span = max(0.5, float(f.max() - f.min()))
+        return (0.5, m_span, _three_marks(0.5, m_span, "°"), 0.5, m_span,
+                0.5, f_span, _three_marks(0.5, f_span, "°"), 0.5, f_span)
+
+    # --- Keep slider and numeric input linked (Main) ---
+    @app.callback(
+        Output("slider-main-step", "value"),
+        Output("input-main-step", "value"),
+        Input("slider-main-step", "value"),
+        Input("input-main-step", "value"),
+        State("slider-main-step", "min"),
+        State("slider-main-step", "max"),
+        prevent_initial_call=True,
+    )
+    def sync_main(slider_val, input_val, vmin, vmax):
+        ctx_id = dash.ctx.triggered_id
+        def clamp(v): 
+            try: 
+                return float(min(max(v, vmin), vmax))
+            except Exception:
+                return vmin
+        if ctx_id == "slider-main-step":
+            v = clamp(slider_val)
+        elif ctx_id == "input-main-step":
+            v = clamp(input_val)
+        else:
+            return no_update, no_update
+        return v, v
+
+    # --- Keep slider and numeric input linked (Folding) ---
+    @app.callback(
+        Output("slider-fold-step", "value"),
+        Output("input-fold-step", "value"),
+        Input("slider-fold-step", "value"),
+        Input("input-fold-step", "value"),
+        State("slider-fold-step", "min"),
+        State("slider-fold-step", "max"),
+        prevent_initial_call=True,
+    )
+    def sync_fold(slider_val, input_val, vmin, vmax):
+        ctx_id = dash.ctx.triggered_id
+        def clamp(v):
+            try:
+                return float(min(max(v, vmin), vmax))
+            except Exception:
+                return vmin
+        if ctx_id == "slider-fold-step":
+            v = clamp(slider_val)
+        elif ctx_id == "input-fold-step":
+            v = clamp(input_val)
+        else:
+            return no_update, no_update
+        return v, v
+
+    # Graph update (use the numeric inputs; sliders are synced anyway)
     @app.callback(
         Output("graph", "figure"),
-        Input("slider-main-step", "value"),
-        Input("slider-fold-step", "value"),
+        Input("input-main-step", "value"),
+        Input("input-fold-step", "value"),
         Input("pedestal-toggle", "value"),
         Input("envelope-type", "value"),
         State("orig-xy", "data"),
@@ -477,7 +496,7 @@ def create_app():
         prefer_concave = (envelope_value == "concave")
 
         _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
-                                        d_fold=fold_step, d_main=main_step)
+                                        d_fold=float(fold_step or 1.0), d_main=float(main_step or 1.0))
         H_dense = height_itp(pts)
         R_dense = outre_itp(pts)
         if include_pedestal:
@@ -497,8 +516,8 @@ def create_app():
     @app.callback(
         Output("download-data", "data"),
         Input("btn-download", "n_clicks"),
-        State("slider-main-step", "value"),
-        State("slider-fold-step", "value"),
+        State("input-main-step", "value"),
+        State("input-fold-step", "value"),
         State("pedestal-toggle", "value"),
         State("fold-angles", "data"),
         State("main-angles", "data"),
@@ -506,10 +525,10 @@ def create_app():
     )
     def download_interpolated(n_clicks, main_step, fold_step, pedestal_value, fold_angles_store, main_angles_store):
         if not n_clicks:
-            return dash.no_update
+            return no_update
         include_pedestal = "on" in (pedestal_value or [])
         _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
-                                        d_fold=fold_step, d_main=main_step)
+                                        d_fold=float(fold_step or 1.0), d_main=float(main_step or 1.0))
         H_dense = height_itp(pts)
         R_dense = outre_itp(pts)
         if include_pedestal:
@@ -521,8 +540,7 @@ def create_app():
             "Height_m":       H_dense,
             "PedestalIncluded": include_pedestal,
         }).dropna()
-        csv_bytes = df_out.to_csv(index=False).encode("utf-8")
-        return dcc.send_bytes(lambda b: b.write(csv_bytes), filename="interpolated_envelope.csv")
+        return dcc.send_data_frame(df_out.to_csv, "interpolated_envelope.csv", index=False)
 
     # Download original matrices
     @app.callback(Output("download-height", "data"), Input("btn-height-csv", "n_clicks"), prevent_initial_call=True)
@@ -535,13 +553,11 @@ def create_app():
 
     return app, server
 
-
 # =========================
 # Entrypoint
 # =========================
 app, server = create_app()
 
 if __name__ == "__main__":
-    # For local runs. In production on Coolify/Render, run with:
-    # gunicorn app:server --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+    # Production: gunicorn app:server --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
     app.run_server(host="0.0.0.0", port=int(os.getenv("PORT", 3000)), debug=True)
