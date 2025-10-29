@@ -13,6 +13,7 @@ from scipy.interpolate import RegularGridInterpolator
 import shapely.geometry as sgeom
 import alphashape
 
+
 # =========================
 # Config
 # =========================
@@ -22,10 +23,12 @@ OUTREACH_CSV = os.getenv("OUTREACH_CSV", "outreach.csv")
 PEDESTAL_HEIGHT_M = float(os.getenv("PEDESTAL_HEIGHT_M", "6"))
 LOGO_URL = os.getenv("LOGO_URL", "/assets/dcn_logo.svg")
 
-MAX_POINTS_FOR_DISPLAY  = 15000
-MAX_POINTS_FOR_ENVELOPE = 6000
-MAX_POINTS_FOR_KNN      = 1200
-KNN_K                   = 8
+# Display/perf caps
+MAX_POINTS_FOR_DISPLAY  = 15000   # Plotly drawing cap
+MAX_POINTS_FOR_ENVELOPE = 6000    # Geometry calc subset cap (lower = faster)
+MAX_POINTS_FOR_KNN      = 1200    # Subset size for alpha estimation
+KNN_K                   = 8        # Neighbour count for distance heuristic
+
 
 # =========================
 # CSV Loading
@@ -35,6 +38,7 @@ def _sniff_delimiter(sample: str) -> str:
         return csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t"]).delimiter
     except Exception:
         return ";"
+
 
 def _clean_angles(vals):
     cleaned = (
@@ -47,7 +51,13 @@ def _clean_angles(vals):
     )
     return pd.to_numeric(cleaned, errors="coerce")
 
+
 def load_matrix_csv(path: str) -> pd.DataFrame:
+    """
+    Load matrix where:
+    - Columns = Main-jib angles
+    - Rows (index) = Folding-jib angles
+    """
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         raw = f.read()
 
@@ -61,7 +71,12 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
         if (
             first_col.lower().strip()
             in {"", "unnamed: 0", "foldingjib", "fold", "fold_angle", "folding"}
-            or df[first_col].dropna().astype(str).str.replace(",", ".", regex=False).str.match(r"^\s*-?\d+(\.\d+)?\s*$").all()
+            or df[first_col]
+            .dropna()
+            .astype(str)
+            .str.replace(",", ".", regex=False)
+            .str.match(r"^\s*-?\d+(\.\d+)?\s*$")
+            .all()
         ):
             df = df.set_index(first_col)
 
@@ -74,6 +89,7 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
         raise ValueError(f"{path} parsed to empty DataFrame.")
     return df
 
+
 # =========================
 # Interpolation & Geometry
 # =========================
@@ -82,19 +98,29 @@ def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame):
     main_angles = height_df.columns.values.astype(float)
     outreach_df = outreach_df.loc[fold_angles, main_angles]
 
-    height_itp = RegularGridInterpolator((fold_angles, main_angles), height_df.values, bounds_error=False, fill_value=None)
-    outre_itp  = RegularGridInterpolator((fold_angles, main_angles), outreach_df.values, bounds_error=False, fill_value=None)
+    height_itp = RegularGridInterpolator(
+        (fold_angles, main_angles), height_df.values, bounds_error=False, fill_value=None
+    )
+    outre_itp  = RegularGridInterpolator(
+        (fold_angles, main_angles), outreach_df.values, bounds_error=False, fill_value=None
+    )
     return fold_angles, main_angles, height_itp, outre_itp
+
 
 def resample_grid(fold_angles, main_angles, d_fold: float, d_main: float):
     fmin, fmax = float(np.min(fold_angles)), float(np.max(fold_angles))
     mmin, mmax = float(np.min(main_angles)), float(np.max(main_angles))
-    d_fold, d_main = max(0.5, float(d_fold)), max(0.5, float(d_main))  # enforce 0.5°
+
+    # Enforce >= 0.5deg at this level too (UI already constrained)
+    d_fold = max(0.5, float(d_fold))
+    d_main = max(0.5, float(d_main))
+
     fnew = np.arange(fmin, fmax + 1e-9, d_fold)
     mnew = np.arange(mmin, mmax + 1e-9, d_main)
     F, M = np.meshgrid(fnew, mnew, indexing="ij")
     pts = np.column_stack([F.ravel(), M.ravel()])
     return fnew, mnew, F, M, pts
+
 
 def _sample_points(arr: np.ndarray, max_n: int) -> np.ndarray:
     n = len(arr)
@@ -102,6 +128,7 @@ def _sample_points(arr: np.ndarray, max_n: int) -> np.ndarray:
         return arr
     idx = np.linspace(0, n - 1, num=max_n, dtype=int)
     return arr[idx]
+
 
 def _near_collinear(pts: np.ndarray) -> bool:
     centered = pts - pts.mean(axis=0)
@@ -111,18 +138,28 @@ def _near_collinear(pts: np.ndarray) -> bool:
     except Exception:
         return True
 
+
 def _estimate_alpha(pts: np.ndarray, k: int = KNN_K) -> float:
+    """
+    Fast heuristic alpha:
+    - take up to MAX_POINTS_FOR_KNN points
+    - compute median distance to k-th nearest neighbour
+    - alpha ~ 1 / (c * d_k)
+    """
     pts = _sample_points(pts, MAX_POINTS_FOR_KNN)
     if len(pts) < k + 2:
         return 1.0
+
     A = pts[:, None, :] - pts[None, :, :]
     D = np.sqrt((A ** 2).sum(axis=2))
     D.sort(axis=1)
     dk = np.median(D[:, k])
     if not np.isfinite(dk) or dk <= 1e-9:
         return 1.0
+
     c = 1.8
     return 1.0 / (c * dk)
+
 
 def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     if xy_points is None:
@@ -131,6 +168,7 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     pts = pts[~np.isnan(pts).any(axis=1)]
     if len(pts) < 3:
         return None
+
     pts = np.unique(pts, axis=0)
     if len(pts) < 3:
         return None
@@ -173,21 +211,32 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
         pass
     return None
 
+
 def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_pedestal: bool):
     fig = go.Figure()
     dense_for_plot = _sample_points(dense_xy, MAX_POINTS_FOR_DISPLAY)
 
     if dense_for_plot.size:
-        fig.add_trace(go.Scatter(x=dense_for_plot[:, 0], y=dense_for_plot[:, 1], mode="markers",
-                                 marker=dict(size=4, symbol="diamond", opacity=0.5),
-                                 name="Interpolated points"))
+        fig.add_trace(go.Scatter(
+            x=dense_for_plot[:, 0], y=dense_for_plot[:, 1],
+            mode="markers",
+            marker=dict(size=4, symbol="diamond", opacity=0.5),
+            name="Interpolated points",
+        ))
     if orig_xy.size:
-        fig.add_trace(go.Scatter(x=orig_xy[:, 0],
-                                 y=orig_xy[:, 1] + (PEDESTAL_HEIGHT_M if include_pedestal else 0.0),
-                                 mode="markers", marker=dict(size=8), name="Original matrix points"))
+        fig.add_trace(go.Scatter(
+            x=orig_xy[:, 0],
+            y=orig_xy[:, 1] + (PEDESTAL_HEIGHT_M if include_pedestal else 0.0),
+            mode="markers",
+            marker=dict(size=8),
+            name="Original matrix points",
+        ))
     if boundary_xy is not None and len(boundary_xy) > 2:
-        fig.add_trace(go.Scatter(x=boundary_xy[:, 0], y=boundary_xy[:, 1], mode="lines",
-                                 line=dict(width=3), name="Envelope"))
+        fig.add_trace(go.Scatter(
+            x=boundary_xy[:, 0], y=boundary_xy[:, 1],
+            mode="lines", line=dict(width=3),
+            name="Envelope",
+        ))
 
     fig.update_layout(
         xaxis_title="Outreach [m]",
@@ -199,6 +248,7 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
     )
     return fig
 
+
 def _three_marks(vmin: float, vmax: float, unit: str):
     mid = (vmin + vmax) / 2.0
     style = {"fontSize": "12px", "color": "#555"}
@@ -208,21 +258,31 @@ def _three_marks(vmin: float, vmax: float, unit: str):
         round(vmax, 2): {"label": f"{vmax:g}{unit}", "style": style},
     }
 
+
 def df_to_dash_table(df: pd.DataFrame, title: str, table_id: str):
+    """
+    Render a DataTable with folding angles as first column and main-angle columns.
+    """
     display_df = df.copy()
     display_df.index.name = "Folding°"
     display_df = display_df.reset_index()
+
     columns = [{"name": str(c), "id": str(c)} for c in display_df.columns]
     data = display_df.rename(columns=str).to_dict("records")
+
     return html.Div([
         html.H4(title, style={"margin": "12px 0 6px 0"}),
         dash_table.DataTable(
-            id=table_id, columns=columns, data=data, page_size=25,
+            id=table_id,
+            columns=columns,
+            data=data,
+            page_size=25,
             style_table={"overflowX": "auto", "border": "1px solid #eee"},
             style_cell={"padding": "6px", "fontFamily": "monospace", "fontSize": "12px"},
             style_header={"fontWeight": "600", "backgroundColor": "#f6f6f6"},
         ),
     ])
+
 
 # =========================
 # App Factory (multi-page)
@@ -238,45 +298,64 @@ def create_app():
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
 
-    # Marks + limits
-    step_min, step_max = 0.5, 10.0
-    step_marks = _three_marks(step_min, step_max, "°")
-
+    # Shared Stores
     stores = html.Div([
         dcc.Store(id="orig-xy", data=orig_xy.tolist()),
         dcc.Store(id="fold-angles", data=fold_angles.tolist()),
         dcc.Store(id="main-angles", data=main_angles.tolist()),
     ])
 
+    # Sidebar
     sidebar = html.Div([
         html.H3("Menu", style={"marginTop": 0}),
         dcc.Link("140T main hoist envelope", href="/envelope", className="nav-link"),
         html.Br(),
         dcc.Link("Test", href="/test", className="nav-link"),
-    ], style={"position": "sticky", "top": "0px", "height": "100vh",
-              "padding": "16px", "borderRight": "1px solid #e5e7eb", "background": "#fafafa"})
+    ], style={
+        "position": "sticky", "top": "0px", "height": "100vh",
+        "padding": "16px", "borderRight": "1px solid #e5e7eb", "background": "#fafafa",
+    })
 
+    # Header
     header = html.Div([
         html.H2("DCN Picasso DSV Engineering Data", style={"margin": 0}),
-        html.Img(src=LOGO_URL, style={"height": "42px", "objectFit": "contain",
-                                      "position": "absolute", "right": "16px", "top": "12px"}, alt="DCN Diving logo"),
+        html.Img(
+            src=LOGO_URL,
+            style={"height": "42px", "objectFit": "contain", "position": "absolute",
+                   "right": "16px", "top": "12px"},
+            alt="DCN Diving logo",
+        ),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
+    # ---- Helper: Slider + Number input (no style on dcc.Slider) ----
     def slider_with_input(slider_id, input_id, default=1.0):
-        return html.Div([
-            dcc.Slider(
-                id=slider_id, min=step_min, max=step_max, step=0.1, value=default,
-                marks=step_marks, included=False, updatemode="mouseup",
-                tooltip={"placement": "bottom", "always_visible": False},
-                style={"flex": "1 1 auto", "marginRight": "10px", "height": "24px"}
-            ),
-            dcc.Input(
-                id=input_id, type="number", value=default,
-                min=step_min, max=step_max, step=0.1,
-                style={"width": "90px", "height": "28px", "fontFamily": "monospace"}
-            ),
-        ], style={"display": "flex", "alignItems": "center", "gap": "6px"})
+        return html.Div(
+            [
+                html.Div(
+                    dcc.Slider(
+                        id=slider_id,
+                        min=0.5,  # UI min; logic will also clamp to span
+                        max=10.0, # UI max
+                        step=0.1,
+                        value=default,
+                        marks=_three_marks(0.5, 10.0, "°"),
+                        included=False,
+                        updatemode="mouseup",
+                        tooltip={"placement": "bottom", "always_visible": False},
+                        dots=False,
+                    ),
+                    style={"flex": "1 1 auto", "marginRight": "8px"}
+                ),
+                dcc.Input(
+                    id=input_id, type="number", value=default,
+                    min=0.5, max=10.0, step=0.1,
+                    style={"width": "90px", "height": "28px", "fontFamily": "monospace"}
+                ),
+            ],
+            style={"display": "flex", "alignItems": "center", "gap": "6px"}
+        )
 
+    # Controls
     envelope_controls = html.Div([
         html.Label("Step between Main-jib matrix angles (°)", style={"fontWeight": 600}),
         slider_with_input("slider-main-step", "input-main-step"),
@@ -297,23 +376,34 @@ def create_app():
             id="envelope-type",
             options=[{"label": "Concave (fast approx)", "value": "concave"},
                      {"label": "Convex hull (fast, stable)", "value": "convex"}],
-            value="convex", style={"marginTop": "5px"}
+            value="convex",
+            style={"marginTop": "5px"}
         ),
 
-        html.Div(id="envelope-help",
-                 style={"marginTop": "6px", "fontSize": "12px", "color": "#555", "lineHeight": "1.35"}),
+        html.Div(
+            id="envelope-help",
+            style={"marginTop": "6px", "fontSize": "12px", "color": "#555", "lineHeight": "1.35"}
+        ),
 
         html.Div([
             html.Button("Download interpolated CSV", id="btn-download", n_clicks=0,
                         style={"marginTop": "10px", "width": "100%"}),
             dcc.Download(id="download-data"),
         ], style={"position": "sticky", "bottom": 0, "background": "#fafafa", "padding": "8px 0"}),
-    ], style={"flex": "0 0 340px", "overflowY": "auto", "height": "78vh",
-              "paddingRight": "12px", "borderRight": "1px solid #eee"})
 
+    ], style={
+        "flex": "0 0 340px",
+        "overflowY": "auto",
+        "height": "78vh",
+        "paddingRight": "12px",
+        "borderRight": "1px solid #eee"
+    })
+
+    # Graph + tables area
     envelope_graph = html.Div(
         [
             dcc.Graph(id="graph", style={"height": "78vh"}),
+            # --- Matrices underneath the curve ---
             html.Div([
                 df_to_dash_table(height_df, "Reference Matrix — Height [m]", "tbl-height"),
                 html.Button("Download Height CSV", id="btn-height-csv", style={"margin": "8px 0 24px 0"}),
@@ -327,12 +417,14 @@ def create_app():
         style={"flex": "1 1 auto", "paddingLeft": "16px"}
     )
 
-    envelope_page = html.Div([envelope_controls, envelope_graph],
-                             style={"display": "flex", "padding": "16px", "gap": "10px"})
+    envelope_page = html.Div(
+        [envelope_controls, envelope_graph],
+        style={"display": "flex", "padding": "16px", "gap": "10px"}
+    )
 
     test_page = html.Div([html.H3("Test Page"), html.P("Placeholder for future content.")], style={"padding": "16px"})
 
-    # IMPORTANT: render envelope page immediately so all components exist at startup
+    # Render envelope page immediately so components exist at startup
     content = html.Div(id="page-content", style={"width": "100%"}, children=envelope_page)
 
     app.layout = html.Div([
@@ -343,7 +435,7 @@ def create_app():
         ], style={"display": "flex", "gap": "0px"}),
     ])
 
-    # Routing (kept, but initial children already set)
+    # Routing (kept; initial children already set)
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def route(pathname: str):
         if pathname in ("/", "/envelope", None):
@@ -365,15 +457,24 @@ def create_app():
                 f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}°")
 
     # Envelope type explanation
-    @app.callback(Output("envelope-help", "children"), Input("envelope-type", "value"))
+    @app.callback(
+        Output("envelope-help", "children"),
+        Input("envelope-type", "value"),
+    )
     def explain_envelope(kind):
         if kind == "concave":
-            return html.Div([html.B("Concave (alpha shape): "),
-                             html.Span("Tightly wraps the points and follows inward bends (concavities).")])
-        return html.Div([html.B("Convex hull: "),
-                         html.Span("Smallest convex polygon enclosing all points; ignores concavities.")])
+            return html.Div([
+                html.B("Concave (alpha shape): "),
+                html.Span("Tightly wraps the points and follows inward bends (concavities). "
+                          "Captures a closer 'true' working envelope but can be sensitive to gaps/noise.")
+            ])
+        return html.Div([
+            html.B("Convex hull: "),
+            html.Span("Smallest convex polygon enclosing all points. Ignores concavities, "
+                      "so it usually overestimates area (conservative), but it’s very fast and stable.")
+        ])
 
-    # --- Keep slider and numeric input linked (Main) using Dash 3 ctx ---
+    # Keep slider and numeric input linked (Main)
     @app.callback(
         Output("slider-main-step", "value"),
         Output("input-main-step", "value"),
@@ -385,18 +486,21 @@ def create_app():
     def sync_main(slider_val, input_val, main_angles_store):
         m = np.array(main_angles_store, float)
         span = max(0.5, float(m.max() - m.min()))
+
         def clamp(v):
             try:
                 v = float(v)
             except Exception:
                 v = 1.0
-            if not np.isfinite(v): v = 1.0
+            if not np.isfinite(v):
+                v = 1.0
             return float(min(max(v, 0.5), span))
-        trig = dash.ctx.triggered_id  # ← Dash 3
+
+        trig = dash.ctx.triggered_id  # Dash 3
         v = clamp(slider_val if trig == "slider-main-step" else input_val)
         return v, v
 
-    # --- Keep slider and numeric input linked (Folding) using Dash 3 ctx ---
+    # Keep slider and numeric input linked (Folding)
     @app.callback(
         Output("slider-fold-step", "value"),
         Output("input-fold-step", "value"),
@@ -408,18 +512,21 @@ def create_app():
     def sync_fold(slider_val, input_val, fold_angles_store):
         f = np.array(fold_angles_store, float)
         span = max(0.5, float(f.max() - f.min()))
+
         def clamp(v):
             try:
                 v = float(v)
             except Exception:
                 v = 1.0
-            if not np.isfinite(v): v = 1.0
+            if not np.isfinite(v):
+                v = 1.0
             return float(min(max(v, 0.5), span))
-        trig = dash.ctx.triggered_id  # ← Dash 3
+
+        trig = dash.ctx.triggered_id  # Dash 3
         v = clamp(slider_val if trig == "slider-fold-step" else input_val)
         return v, v
 
-    # Graph update (read numeric inputs, sliders mirror them)
+    # Graph update (drive from numeric inputs; sliders mirror them)
     @app.callback(
         Output("graph", "figure"),
         Input("input-main-step", "value"),
@@ -439,12 +546,14 @@ def create_app():
         f = np.array(fold_angles_store, float)
         m_span = max(0.5, float(m.max() - m.min()))
         f_span = max(0.5, float(f.max() - f.min()))
+
         def clamp(v, span):
             try:
                 v = float(v)
             except Exception:
                 v = 1.0
-            if not np.isfinite(v): v = 1.0
+            if not np.isfinite(v):
+                v = 1.0
             return float(min(max(v, 0.5), span))
 
         main_step = clamp(main_step, m_span)
@@ -460,8 +569,10 @@ def create_app():
         dense_xy = np.column_stack([R_dense, H_dense])
         dense_xy = dense_xy[~np.isnan(dense_xy).any(axis=1)]
 
-        envelope_xy = compute_boundary_curve(_sample_points(dense_xy, MAX_POINTS_FOR_ENVELOPE),
-                                             prefer_concave=prefer_concave)
+        envelope_xy = compute_boundary_curve(
+            _sample_points(dense_xy, MAX_POINTS_FOR_ENVELOPE),
+            prefer_concave=prefer_concave
+        )
 
         return make_figure(np.array(orig_xy_store), dense_xy, envelope_xy, include_pedestal)
 
@@ -492,12 +603,14 @@ def create_app():
         f = np.array(fold_angles_store, float)
         m_span = max(0.5, float(m.max() - m.min()))
         f_span = max(0.5, float(f.max() - f.min()))
+
         def clamp(v, span):
             try:
                 v = float(v)
             except Exception:
                 v = 1.0
-            if not np.isfinite(v): v = 1.0
+            if not np.isfinite(v):
+                v = 1.0
             return float(min(max(v, 0.5), span))
 
         main_step = clamp(main_step, m_span)
@@ -523,10 +636,13 @@ def create_app():
 
     return app, server
 
+
 # =========================
 # Entrypoint
 # =========================
 app, server = create_app()
 
 if __name__ == "__main__":
+    # For local runs. In production on Coolify/Render, run with:
+    # gunicorn app:server --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
     app.run_server(host="0.0.0.0", port=int(os.getenv("PORT", 3000)), debug=True)
