@@ -7,6 +7,11 @@ import pandas as pd
 from flask import Flask
 import dash
 from dash import dcc, html, Input, Output, State, dash_table
+try:
+    # Dash >=2.9
+    from dash import ctx
+except Exception:  # fallback for older Dash
+    from dash import callback_context as ctx
 import plotly.graph_objects as go
 
 from scipy.interpolate import RegularGridInterpolator
@@ -21,7 +26,6 @@ DATA_DIR = os.getenv("DATA_DIR", "./data")
 HEIGHT_CSV = os.getenv("HEIGHT_CSV", "height.csv")
 OUTREACH_CSV = os.getenv("OUTREACH_CSV", "outreach.csv")
 PEDESTAL_HEIGHT_M = float(os.getenv("PEDESTAL_HEIGHT_M", "6"))
-# Serve a local asset for reliability (put your file at ./assets/dcn_logo.svg)
 LOGO_URL = os.getenv("LOGO_URL", "/assets/dcn_logo.svg")
 
 # Display/perf caps
@@ -259,12 +263,10 @@ def df_to_dash_table(df: pd.DataFrame, title: str, table_id: str):
     """
     Render a DataTable with folding angles as first column and main-angle columns.
     """
-    # Build a display DataFrame with index as first column
     display_df = df.copy()
     display_df.index.name = "Folding°"
     display_df = display_df.reset_index()
 
-    # Convert all column headers to strings to avoid id issues
     columns = [{"name": str(c), "id": str(c)} for c in display_df.columns]
     data = display_df.rename(columns=str).to_dict("records")
 
@@ -329,22 +331,42 @@ def create_app():
         ),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
-    # Controls
+    # Controls (sliders made slimmer via className; number inputs linked)
     envelope_controls = html.Div([
         html.Label("Step between Main-jib matrix angles (°)", style={"fontWeight": 600}),
-        dcc.Slider(
-            id="slider-main-step", min=step_min, max=step_max, step=0.1, value=1.0,
-            marks=step_marks, included=False, updatemode="mouseup",
-            tooltip={"placement": "bottom", "always_visible": False},
-        ),
+        html.Div([
+            dcc.Slider(
+                id="slider-main-step",
+                min=step_min, max=step_max, step=0.1, value=1.0,
+                marks=step_marks, included=False, updatemode="mouseup",
+                tooltip={"placement": "bottom", "always_visible": False},
+                className="thin-slider",
+                style={"flex": "1", "marginRight": "8px"}
+            ),
+            dcc.Input(
+                id="input-main-step",
+                type="number", min=step_min, max=step_max, step=0.1, value=1.0,
+                debounce=True, style={"width": "90px"}
+            ),
+        ], style={"display": "flex", "alignItems": "center", "gap": "8px", "marginBottom": "6px"}),
         html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
 
         html.Label("Step between Folding-jib matrix angles (°)", style={"fontWeight": 600, "marginTop": "10px"}),
-        dcc.Slider(
-            id="slider-fold-step", min=step_min, max=step_max, step=0.1, value=1.0,
-            marks=step_marks, included=False, updatemode="mouseup",
-            tooltip={"placement": "bottom", "always_visible": False},
-        ),
+        html.Div([
+            dcc.Slider(
+                id="slider-fold-step",
+                min=step_min, max=step_max, step=0.1, value=1.0,
+                marks=step_marks, included=False, updatemode="mouseup",
+                tooltip={"placement": "bottom", "always_visible": False},
+                className="thin-slider",
+                style={"flex": "1", "marginRight": "8px"}
+            ),
+            dcc.Input(
+                id="input-fold-step",
+                type="number", min=step_min, max=step_max, step=0.1, value=1.0,
+                debounce=True, style={"width": "90px"}
+            ),
+        ], style={"display": "flex", "alignItems": "center", "gap": "8px", "marginBottom": "6px"}),
         html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
 
         dcc.Checklist(
@@ -362,7 +384,6 @@ def create_app():
             style={"marginTop": "5px"}
         ),
 
-        # ⬇️ Explanatory context under the toggle
         html.Div(
             id="envelope-help",
             style={"marginTop": "6px", "fontSize": "12px", "color": "#555", "lineHeight": "1.35"}
@@ -386,7 +407,7 @@ def create_app():
     envelope_graph = html.Div(
         [
             dcc.Graph(id="graph", style={"height": "78vh"}),
-            # --- Matrices underneath the curve ---
+            # --- Plain tables underneath the curve ---
             html.Div([
                 df_to_dash_table(height_df, "Reference Matrix — Height [m]", "tbl-height"),
                 html.Button("Download Height CSV", id="btn-height-csv", style={"margin": "8px 0 24px 0"}),
@@ -416,7 +437,9 @@ def create_app():
         ], style={"display": "flex", "gap": "0px"}),
     ])
 
+    # -------------------------
     # Routing
+    # -------------------------
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def route(pathname: str):
         if pathname in ("/", "/envelope", None):
@@ -425,7 +448,9 @@ def create_app():
             return test_page
         return html.Div([html.H3("404"), html.P(f"Path not found: {pathname}")], style={"padding": "16px"})
 
+    # -------------------------
     # Ranges text
+    # -------------------------
     @app.callback(
         Output("main-range", "children"),
         Output("fold-range", "children"),
@@ -437,7 +462,9 @@ def create_app():
         return (f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}°",
                 f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}°")
 
+    # -------------------------
     # Envelope type explanation
+    # -------------------------
     @app.callback(
         Output("envelope-help", "children"),
         Input("envelope-type", "value"),
@@ -460,7 +487,55 @@ def create_app():
             )
         ])
 
+    # -------------------------
+    # Sync sliders <-> numeric inputs
+    # -------------------------
+    def _clamp(v, vmin, vmax):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        return max(vmin, min(vmax, v))
+
+    @app.callback(
+        Output("slider-main-step", "value"),
+        Output("input-main-step", "value"),
+        Input("slider-main-step", "value"),
+        Input("input-main-step", "value"),
+        prevent_initial_call=True,
+    )
+    def sync_main_step(slider_val, input_val):
+        trg = getattr(ctx, "triggered_id", None)
+        vmin, vmax = 0.1, 10.0
+        if trg == "slider-main-step":
+            v = _clamp(slider_val, vmin, vmax)
+        else:
+            v = _clamp(input_val, vmin, vmax)
+            if v is None:
+                v = 1.0
+        return v, v
+
+    @app.callback(
+        Output("slider-fold-step", "value"),
+        Output("input-fold-step", "value"),
+        Input("slider-fold-step", "value"),
+        Input("input-fold-step", "value"),
+        prevent_initial_call=True,
+    )
+    def sync_fold_step(slider_val, input_val):
+        trg = getattr(ctx, "triggered_id", None)
+        vmin, vmax = 0.1, 10.0
+        if trg == "slider-fold-step":
+            v = _clamp(slider_val, vmin, vmax)
+        else:
+            v = _clamp(input_val, vmin, vmax)
+            if v is None:
+                v = 1.0
+        return v, v
+
+    # -------------------------
     # Graph update
+    # -------------------------
     @app.callback(
         Output("graph", "figure"),
         Input("slider-main-step", "value"),
@@ -493,7 +568,9 @@ def create_app():
 
         return make_figure(np.array(orig_xy_store), dense_xy, envelope_xy, include_pedestal)
 
-    # Download interpolated grid
+    # -------------------------
+    # Download: interpolated grid
+    # -------------------------
     @app.callback(
         Output("download-data", "data"),
         Input("btn-download", "n_clicks"),
@@ -524,7 +601,9 @@ def create_app():
         csv_bytes = df_out.to_csv(index=False).encode("utf-8")
         return dcc.send_bytes(lambda b: b.write(csv_bytes), filename="interpolated_envelope.csv")
 
-    # Download original matrices
+    # -------------------------
+    # Download: original matrices
+    # -------------------------
     @app.callback(Output("download-height", "data"), Input("btn-height-csv", "n_clicks"), prevent_initial_call=True)
     def download_height_matrix(n):
         return dcc.send_data_frame(height_df.to_csv, "height_matrix.csv")
@@ -542,6 +621,5 @@ def create_app():
 app, server = create_app()
 
 if __name__ == "__main__":
-    # For local runs. In production on Coolify/Render, run with:
-    # gunicorn app:server --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
+    # Prod example: gunicorn app:server --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120
     app.run_server(host="0.0.0.0", port=int(os.getenv("PORT", 3000)), debug=True)
