@@ -6,7 +6,7 @@ import pandas as pd
 
 from flask import Flask
 import dash
-from dash import dcc, html, Input, Output, State, dash_table, no_update
+from dash import dcc, html, Input, Output, State, dash_table
 import plotly.graph_objects as go
 
 from scipy.interpolate import RegularGridInterpolator
@@ -58,7 +58,8 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
         df = pd.read_csv(io.StringIO(raw), sep=delim, engine="python")
         first_col = df.columns[0]
         if (
-            first_col.lower().strip() in {"", "unnamed: 0", "foldingjib", "fold", "fold_angle", "folding"}
+            first_col.lower().strip()
+            in {"", "unnamed: 0", "foldingjib", "fold", "fold_angle", "folding"}
             or df[first_col]
             .dropna()
             .astype(str)
@@ -94,6 +95,7 @@ def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame):
 def resample_grid(fold_angles, main_angles, d_fold: float, d_main: float):
     fmin, fmax = float(np.min(fold_angles)), float(np.max(fold_angles))
     mmin, mmax = float(np.min(main_angles)), float(np.max(main_angles))
+    # enforce 0.5° minimum here
     d_fold, d_main = max(0.5, d_fold), max(0.5, d_main)
     fnew = np.arange(fmin, fmax + 1e-9, d_fold)
     mnew = np.arange(mmin, mmax + 1e-9, d_main)
@@ -139,6 +141,7 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     pts = np.unique(pts, axis=0)
     if len(pts) < 3:
         return None
+
     if _near_collinear(pts):
         try:
             hull = sgeom.MultiPoint(pts).convex_hull
@@ -151,6 +154,7 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
             return None
         except Exception:
             return None
+
     poly = None
     if prefer_concave:
         try:
@@ -159,8 +163,10 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
             poly = alphashape.alphashape(pts_cap, alpha)
         except Exception:
             poly = None
+
     if poly is None:
         poly = sgeom.MultiPoint(pts).convex_hull
+
     try:
         if isinstance(poly, sgeom.MultiPolygon):
             poly = max(poly.geoms, key=lambda g: g.area)
@@ -177,7 +183,6 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
 def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_pedestal: bool):
     fig = go.Figure()
     dense_for_plot = _sample_points(dense_xy, MAX_POINTS_FOR_DISPLAY)
-
     if dense_for_plot.size:
         fig.add_trace(go.Scatter(
             x=dense_for_plot[:, 0], y=dense_for_plot[:, 1],
@@ -212,7 +217,7 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
 
 def _three_marks(vmin: float, vmax: float, unit: str):
     mid = (vmin + vmax) / 2.0
-    style = {"fontSize": "11px", "color": "#555"}
+    style = {"fontSize": "12px", "color": "#555"}
     return {
         round(vmin, 2): {"label": f"{vmin:g}{unit}", "style": style},
         round(mid,  2): {"label": f"{mid:g}{unit}",  "style": style},
@@ -239,20 +244,24 @@ def df_to_dash_table(df: pd.DataFrame, title: str, table_id: str):
     ])
 
 # =========================
-# App Factory
+# App Factory (multi-page)
 # =========================
 def create_app():
     server = Flask(__name__)
     app = dash.Dash(__name__, server=server, suppress_callback_exceptions=True,
                     title="DCN Picasso DSV Engineering Data")
 
-    # Data
+    # Load data
     height_df = load_matrix_csv(os.path.join(DATA_DIR, HEIGHT_CSV))
     outreach_df = load_matrix_csv(os.path.join(DATA_DIR, OUTREACH_CSV))
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
 
-    # Stores
+    # Slider marks
+    step_min, step_max = 0.5, 10.0  # min now 0.5°
+    step_marks = _three_marks(step_min, step_max, "°")
+
+    # Shared Stores
     stores = html.Div([
         dcc.Store(id="orig-xy", data=orig_xy.tolist()),
         dcc.Store(id="fold-angles", data=fold_angles.tolist()),
@@ -281,31 +290,31 @@ def create_app():
         ),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
-    # ====== Controls (compact sliders + inputs) ======
-    def slider_row(slider_id, input_id):
+    # Helper to render a compact slider + numeric input row
+    def slider_with_input(slider_id, input_id, default=1.0):
         return html.Div([
             dcc.Slider(
-                id=slider_id, min=0.5, max=5.0, step=0.1, value=1.0,
-                included=False, updatemode="mouseup",
-                marks=_three_marks(0.5, 5.0, "°"),
+                id=slider_id, min=step_min, max=step_max, step=0.1, value=default,
+                marks=step_marks, included=False, updatemode="mouseup",
                 tooltip={"placement": "bottom", "always_visible": False},
                 style={"flex": "1 1 auto", "marginRight": "10px", "height": "24px"}
             ),
             dcc.Input(
-                id=input_id, type="number", value=1.0,
-                min=0.5, max=5.0, step=0.1,
+                id=input_id, type="number", value=default,
+                min=step_min, max=step_max, step=0.1,
                 style={"width": "90px", "height": "28px", "fontFamily": "monospace"}
             ),
-        ], style={"display": "flex", "alignItems": "center", "gap": "6px", "marginBottom": "6px"})
+        ], style={"display": "flex", "alignItems": "center", "gap": "6px"})
 
+    # Controls
     envelope_controls = html.Div([
         html.Label("Step between Main-jib matrix angles (°)", style={"fontWeight": 600}),
-        slider_row("slider-main-step", "input-main-step"),
-        html.Div(id="main-range", style={"marginTop": "2px", "fontFamily": "monospace", "color": "#444"}),
+        slider_with_input("slider-main-step", "input-main-step"),
+        html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
 
         html.Label("Step between Folding-jib matrix angles (°)", style={"fontWeight": 600, "marginTop": "10px"}),
-        slider_row("slider-fold-step", "input-fold-step"),
-        html.Div(id="fold-range", style={"marginTop": "2px", "fontFamily": "monospace", "color": "#444"}),
+        slider_with_input("slider-fold-step", "input-fold-step"),
+        html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
 
         dcc.Checklist(
             id="pedestal-toggle",
@@ -322,8 +331,10 @@ def create_app():
             style={"marginTop": "5px"}
         ),
 
-        html.Div(id="envelope-help",
-                 style={"marginTop": "6px", "fontSize": "12px", "color": "#555", "lineHeight": "1.35"}),
+        html.Div(
+            id="envelope-help",
+            style={"marginTop": "6px", "fontSize": "12px", "color": "#555", "lineHeight": "1.35"}
+        ),
 
         html.Div([
             html.Button("Download interpolated CSV", id="btn-download", n_clicks=0,
@@ -393,41 +404,18 @@ def create_app():
         return (f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}°",
                 f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}°")
 
-    # Explain envelope type
+    # Envelope type explanation
     @app.callback(Output("envelope-help", "children"), Input("envelope-type", "value"))
     def explain_envelope(kind):
         if kind == "concave":
             return html.Div([
                 html.B("Concave (alpha shape): "),
-                html.Span("Tightly wraps the points and follows inward bends. Closer to 'true' envelope; more sensitive.")
+                html.Span("Tightly wraps the points and follows inward bends (concavities).")
             ])
         return html.Div([
             html.B("Convex hull: "),
-            html.Span("Smallest convex polygon enclosing all points. Ignores concavities; fast and stable.")
+            html.Span("Smallest convex polygon enclosing all points; ignores concavities.")
         ])
-
-    # --- Dynamic bounds for step controls (min=0.5, max=angle span) ---
-    @app.callback(
-        Output("slider-main-step", "min"),
-        Output("slider-main-step", "max"),
-        Output("slider-main-step", "marks"),
-        Output("input-main-step", "min"),
-        Output("input-main-step", "max"),
-        Output("slider-fold-step", "min"),
-        Output("slider-fold-step", "max"),
-        Output("slider-fold-step", "marks"),
-        Output("input-fold-step", "min"),
-        Output("input-fold-step", "max"),
-        Input("main-angles", "data"),
-        Input("fold-angles", "data"),
-    )
-    def update_step_bounds(main_angles_store, fold_angles_store):
-        m = np.array(main_angles_store, float)
-        f = np.array(fold_angles_store, float)
-        m_span = max(0.5, float(m.max() - m.min()))
-        f_span = max(0.5, float(f.max() - f.min()))
-        return (0.5, m_span, _three_marks(0.5, m_span, "°"), 0.5, m_span,
-                0.5, f_span, _three_marks(0.5, f_span, "°"), 0.5, f_span)
 
     # --- Keep slider and numeric input linked (Main) ---
     @app.callback(
@@ -435,23 +423,29 @@ def create_app():
         Output("input-main-step", "value"),
         Input("slider-main-step", "value"),
         Input("input-main-step", "value"),
-        State("slider-main-step", "min"),
-        State("slider-main-step", "max"),
+        State("main-angles", "data"),
         prevent_initial_call=True,
     )
-    def sync_main(slider_val, input_val, vmin, vmax):
-        ctx_id = dash.ctx.triggered_id
-        def clamp(v): 
-            try: 
-                return float(min(max(v, vmin), vmax))
+    def sync_main(slider_val, input_val, main_angles_store):
+        # compute allowed span; clamp to [0.5, span]
+        m = np.array(main_angles_store, float)
+        span = max(0.5, float(m.max() - m.min()))
+        def clamp(v):
+            try:
+                v = float(v)
+                if not np.isfinite(v):
+                    v = 1.0
             except Exception:
-                return vmin
-        if ctx_id == "slider-main-step":
+                v = 1.0
+            return float(min(max(v, 0.5), span))
+
+        ctx = dash.callback_context.triggered[0]["prop_id"].split(".")[0] if dash.callback_context.triggered else None
+        if ctx == "slider-main-step":
             v = clamp(slider_val)
-        elif ctx_id == "input-main-step":
+        elif ctx == "input-main-step":
             v = clamp(input_val)
         else:
-            return no_update, no_update
+            v = clamp(1.0)
         return v, v
 
     # --- Keep slider and numeric input linked (Folding) ---
@@ -460,26 +454,31 @@ def create_app():
         Output("input-fold-step", "value"),
         Input("slider-fold-step", "value"),
         Input("input-fold-step", "value"),
-        State("slider-fold-step", "min"),
-        State("slider-fold-step", "max"),
+        State("fold-angles", "data"),
         prevent_initial_call=True,
     )
-    def sync_fold(slider_val, input_val, vmin, vmax):
-        ctx_id = dash.ctx.triggered_id
+    def sync_fold(slider_val, input_val, fold_angles_store):
+        f = np.array(fold_angles_store, float)
+        span = max(0.5, float(f.max() - f.min()))
         def clamp(v):
             try:
-                return float(min(max(v, vmin), vmax))
+                v = float(v)
+                if not np.isfinite(v):
+                    v = 1.0
             except Exception:
-                return vmin
-        if ctx_id == "slider-fold-step":
+                v = 1.0
+            return float(min(max(v, 0.5), span))
+
+        ctx = dash.callback_context.triggered[0]["prop_id"].split(".")[0] if dash.callback_context.triggered else None
+        if ctx == "slider-fold-step":
             v = clamp(slider_val)
-        elif ctx_id == "input-fold-step":
+        elif ctx == "input-fold-step":
             v = clamp(input_val)
         else:
-            return no_update, no_update
+            v = clamp(1.0)
         return v, v
 
-    # Graph update (use the numeric inputs; sliders are synced anyway)
+    # Graph update (use numeric inputs; sliders mirror them)
     @app.callback(
         Output("graph", "figure"),
         Input("input-main-step", "value"),
@@ -495,8 +494,25 @@ def create_app():
         include_pedestal = "on" in (pedestal_value or [])
         prefer_concave = (envelope_value == "concave")
 
+        # Clamp again against real spans (robust and avoids race conditions)
+        m = np.array(main_angles_store, float)
+        f = np.array(fold_angles_store, float)
+        m_span = max(0.5, float(m.max() - m.min()))
+        f_span = max(0.5, float(f.max() - f.min()))
+        def clamp(v, span): 
+            try:
+                v = float(v)
+            except Exception:
+                v = 1.0
+            if not np.isfinite(v):
+                v = 1.0
+            return float(min(max(v, 0.5), span))
+
+        main_step = clamp(main_step, m_span)
+        fold_step = clamp(fold_step, f_span)
+
         _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
-                                        d_fold=float(fold_step or 1.0), d_main=float(main_step or 1.0))
+                                        d_fold=fold_step, d_main=main_step)
         H_dense = height_itp(pts)
         R_dense = outre_itp(pts)
         if include_pedestal:
@@ -525,14 +541,32 @@ def create_app():
     )
     def download_interpolated(n_clicks, main_step, fold_step, pedestal_value, fold_angles_store, main_angles_store):
         if not n_clicks:
-            return no_update
+            return dash.no_update
+
+        m = np.array(main_angles_store, float)
+        f = np.array(fold_angles_store, float)
+        m_span = max(0.5, float(m.max() - m.min()))
+        f_span = max(0.5, float(f.max() - f.min()))
+        def clamp(v, span):
+            try:
+                v = float(v)
+            except Exception:
+                v = 1.0
+            if not np.isfinite(v):
+                v = 1.0
+            return float(min(max(v, 0.5), span))
+
+        main_step = clamp(main_step, m_span)
+        fold_step = clamp(fold_step, f_span)
+
         include_pedestal = "on" in (pedestal_value or [])
         _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
-                                        d_fold=float(fold_step or 1.0), d_main=float(main_step or 1.0))
+                                        d_fold=fold_step, d_main=main_step)
         H_dense = height_itp(pts)
         R_dense = outre_itp(pts)
         if include_pedestal:
             H_dense = H_dense + PEDESTAL_HEIGHT_M
+
         df_out = pd.DataFrame({
             "FoldingJib_deg": pts[:, 0],
             "MainJib_deg":    pts[:, 1],
@@ -540,7 +574,8 @@ def create_app():
             "Height_m":       H_dense,
             "PedestalIncluded": include_pedestal,
         }).dropna()
-        return dcc.send_data_frame(df_out.to_csv, "interpolated_envelope.csv", index=False)
+        csv_bytes = df_out.to_csv(index=False).encode("utf-8")
+        return dcc.send_bytes(lambda b: b.write(csv_bytes), filename="interpolated_envelope.csv")
 
     # Download original matrices
     @app.callback(Output("download-height", "data"), Input("btn-height-csv", "n_clicks"), prevent_initial_call=True)
