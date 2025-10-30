@@ -107,16 +107,30 @@ def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame):
     return fold_angles, main_angles, height_itp, outre_itp
 
 
-def resample_grid(fold_angles, main_angles, d_fold: float, d_main: float):
-    fmin, fmax = float(np.min(fold_angles)), float(np.max(fold_angles))
-    mmin, mmax = float(np.min(main_angles)), float(np.max(main_angles))
+def expand_angles_by_factor(sorted_angles: np.ndarray, factor: int) -> np.ndarray:
+    """
+    Per-interval subdivision that ALWAYS includes the original CSV angles.
+    For each consecutive pair (a,b), generate 'factor' equal sub-intervals, i.e.,
+    np.linspace(a, b, factor+1). All originals are preserved; last endpoint is included once.
+    """
+    arr = np.unique(np.asarray(sorted_angles, dtype=float))
+    arr.sort()
+    if len(arr) < 2 or factor <= 1:
+        return arr.copy()
 
-    # Enforce >= 0.5deg at this level too (UI already constrained)
-    d_fold = max(0.5, float(d_fold))
-    d_main = max(0.5, float(d_main))
+    out = [arr[0]]
+    for i in range(len(arr) - 1):
+        a, b = arr[i], arr[i + 1]
+        # factor+1 points between a..b inclusive; skip the first to avoid duplicates
+        seg = np.linspace(a, b, int(factor) + 1, endpoint=True)[1:]
+        out.extend(seg.tolist())
+    return np.array(out, dtype=float)
 
-    fnew = np.arange(fmin, fmax + 1e-9, d_fold)
-    mnew = np.arange(mmin, mmax + 1e-9, d_main)
+
+def resample_grid_by_factors(fold_angles: np.ndarray, main_angles: np.ndarray,
+                             fold_factor: int, main_factor: int):
+    fnew = expand_angles_by_factor(fold_angles, fold_factor)
+    mnew = expand_angles_by_factor(main_angles, main_factor)
     F, M = np.meshgrid(fnew, mnew, indexing="ij")
     pts = np.column_stack([F.ravel(), M.ravel()])
     return fnew, mnew, F, M, pts
@@ -249,16 +263,6 @@ def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_
     return fig
 
 
-def _three_marks(vmin: float, vmax: float, unit: str):
-    mid = (vmin + vmax) / 2.0
-    style = {"fontSize": "12px", "color": "#555"}
-    return {
-        round(vmin, 2): {"label": f"{vmin:g}{unit}", "style": style},
-        round(mid,  2): {"label": f"{mid:g}{unit}",  "style": style},
-        round(vmax, 2): {"label": f"{vmax:g}{unit}", "style": style},
-    }
-
-
 def df_to_dash_table(df: pd.DataFrame, title: str, table_id: str):
     """
     Render a DataTable with folding angles as first column and main-angle columns.
@@ -298,19 +302,6 @@ def create_app():
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
 
-    # NEW: compute the maximum actual angle gaps in the CSVs (caps for step size)
-    def _max_gap(arr: np.ndarray) -> float:
-        arr = np.unique(np.asarray(arr, dtype=float))
-        arr.sort()
-        if len(arr) < 2:
-            return 0.5  # fallback to UI min
-        gaps = np.diff(arr)
-        gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
-        return float(np.max(gaps)) if gaps.size else 0.5
-
-    MAIN_MAX_STEP = max(0.5, round(_max_gap(main_angles), 2))
-    FOLD_MAX_STEP = max(0.5, round(_max_gap(fold_angles), 2))
-
     # Shared Stores
     stores = html.Div([
         dcc.Store(id="orig-xy", data=orig_xy.tolist()),
@@ -340,48 +331,25 @@ def create_app():
         ),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
-    # ---- Helper: Slider + Number input (2 dp and dynamic max) ----
-    def slider_with_input(slider_id, input_id, default=1.0, max_val=10.0):
-        default = float(min(max(default, 0.5), max_val))
-        return html.Div(
-            [
-                html.Div(
-                    dcc.Slider(
-                        id=slider_id,
-                        min=0.5,
-                        max=max_val,                # dynamic cap from CSV
-                        step=0.01,                  # 2-decimal resolution
-                        value=default,
-                        marks=_three_marks(0.5, max_val, "°"),
-                        included=False,
-                        updatemode="mouseup",
-                        tooltip={"placement": "bottom", "always_visible": False},
-                        dots=False,
-                    ),
-                    style={"flex": "1 1 auto", "marginRight": "8px"}
-                ),
-                dcc.Input(
-                    id=input_id,
-                    type="number",
-                    value=round(default, 2),       # show 2 dp
-                    min=0.5,
-                    max=max_val,                   # dynamic cap
-                    step=0.01,                     # 2-decimal steps
-                    style={"width": "90px", "height": "28px", "fontFamily": "monospace", "textAlign": "right"}
-                ),
-            ],
-            style={"display": "flex", "alignItems": "center", "gap": "6px"}
-        )
+    # ---- Controls (Dropdowns) ----
+    def factor_dropdown(id_, label, options, value):
+        return html.Div([
+            html.Label(label, style={"fontWeight": 600}),
+            dcc.Dropdown(
+                id=id_,
+                options=[{"label": f"{o}× per-interval", "value": o} for o in options],
+                value=value,
+                clearable=False,
+                style={"marginBottom": "8px"}
+            ),
+        ], style={"marginBottom": "8px"})
 
-    # Controls
     envelope_controls = html.Div([
-        html.Label("Step between Main-jib matrix angles (°)", style={"fontWeight": 600}),
-        slider_with_input("slider-main-step", "input-main-step", default=1.0, max_val=MAIN_MAX_STEP),
-        html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
+        factor_dropdown("main-factor", "Main-jib subdivision", [2, 4, 8], 4),
+        factor_dropdown("fold-factor", "Folding-jib subdivision", [2, 4, 8, 16], 4),
 
-        html.Label("Step between Folding-jib matrix angles (°)", style={"fontWeight": 600, "marginTop": "10px"}),
-        slider_with_input("slider-fold-step", "input-fold-step", default=1.0, max_val=FOLD_MAX_STEP),
-        html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
+        html.Div(id="main-range", style={"marginTop": "2px", "fontFamily": "monospace", "color": "#444"}),
+        html.Div(id="fold-range", style={"marginTop": "2px", "fontFamily": "monospace", "color": "#444"}),
 
         dcc.Checklist(
             id="pedestal-toggle",
@@ -453,7 +421,7 @@ def create_app():
         ], style={"display": "flex", "gap": "0px"}),
     ])
 
-    # Routing (kept; initial children already set)
+    # Routing
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def route(pathname: str):
         if pathname in ("/", "/envelope", None):
@@ -471,17 +439,11 @@ def create_app():
     )
     def show_ranges(main_angles_store, fold_angles_store):
         main_arr, fold_arr = np.array(main_angles_store, float), np.array(fold_angles_store, float)
-
-        def _max_gap_local(arr):
-            arr = np.unique(np.asarray(arr, dtype=float))
-            arr.sort()
-            gaps = np.diff(arr)
-            gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
-            return float(np.max(gaps)) if gaps.size else 0.5
-
         return (
-            f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}° (max step allowed: {_max_gap_local(main_arr):.2f}°)",
-            f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}° (max step allowed: {_max_gap_local(fold_arr):.2f}°)",
+            f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}° "
+            f"(original points: {len(np.unique(main_arr))})",
+            f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}° "
+            f"(original points: {len(np.unique(fold_arr))})",
         )
 
     # Envelope type explanation
@@ -502,114 +464,31 @@ def create_app():
                       "so it usually overestimates area (conservative), but it’s very fast and stable.")
         ])
 
-    # Keep slider and numeric input linked (Main)
-    @app.callback(
-        Output("slider-main-step", "value"),
-        Output("input-main-step", "value"),
-        Input("slider-main-step", "value"),
-        Input("input-main-step", "value"),
-        State("main-angles", "data"),
-        prevent_initial_call=True,
-    )
-    def sync_main(slider_val, input_val, main_angles_store):
-        m = np.array(main_angles_store, float)
-
-        def allowed_max(arr):
-            arr = np.unique(np.asarray(arr, dtype=float)); arr.sort()
-            gaps = np.diff(arr); gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
-            return float(np.max(gaps)) if gaps.size else 0.5
-
-        cap = max(0.5, allowed_max(m))
-
-        def clamp2(v):
-            try:
-                v = float(v)
-            except Exception:
-                v = 1.0
-            if not np.isfinite(v):
-                v = 1.0
-            v = min(max(v, 0.5), cap)
-            return round(v, 2)
-
-        trig = dash.ctx.triggered_id  # Dash 3
-        v = clamp2(slider_val if trig == "slider-main-step" else input_val)
-        return v, v
-
-    # Keep slider and numeric input linked (Folding)
-    @app.callback(
-        Output("slider-fold-step", "value"),
-        Output("input-fold-step", "value"),
-        Input("slider-fold-step", "value"),
-        Input("input-fold-step", "value"),
-        State("fold-angles", "data"),
-        prevent_initial_call=True,
-    )
-    def sync_fold(slider_val, input_val, fold_angles_store):
-        f = np.array(fold_angles_store, float)
-
-        def allowed_max(arr):
-            arr = np.unique(np.asarray(arr, dtype=float)); arr.sort()
-            gaps = np.diff(arr); gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
-            return float(np.max(gaps)) if gaps.size else 0.5
-
-        cap = max(0.5, allowed_max(f))
-
-        def clamp2(v):
-            try:
-                v = float(v)
-            except Exception:
-                v = 1.0
-            if not np.isfinite(v):
-                v = 1.0
-            v = min(max(v, 0.5), cap)
-            return round(v, 2)
-
-        trig = dash.ctx.triggered_id
-        v = clamp2(slider_val if trig == "slider-fold-step" else input_val)
-        return v, v
-
-    # Graph update (drive from numeric inputs; sliders mirror them)
+    # Graph update (drive from dropdown factors)
     @app.callback(
         Output("graph", "figure"),
-        Input("input-main-step", "value"),
-        Input("input-fold-step", "value"),
+        Input("main-factor", "value"),
+        Input("fold-factor", "value"),
         Input("pedestal-toggle", "value"),
         Input("envelope-type", "value"),
         State("orig-xy", "data"),
         State("fold-angles", "data"),
         State("main-angles", "data"),
     )
-    def update_figure(main_step, fold_step, pedestal_value, envelope_value,
+    def update_figure(main_factor, fold_factor, pedestal_value, envelope_value,
                       orig_xy_store, fold_angles_store, main_angles_store):
         include_pedestal = "on" in (pedestal_value or [])
         prefer_concave = (envelope_value == "concave")
 
-        m = np.array(main_angles_store, float)
+        # Fallbacks
+        main_factor = int(main_factor or 2)
+        fold_factor = int(fold_factor or 2)
+
         f = np.array(fold_angles_store, float)
+        m = np.array(main_angles_store, float)
 
-        def allowed_max(arr):
-            arr = np.unique(np.asarray(arr, dtype=float)); arr.sort()
-            gaps = np.diff(arr); gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
-            return float(np.max(gaps)) if gaps.size else 0.5
+        _, _, _, _, pts = resample_grid_by_factors(f, m, fold_factor, main_factor)
 
-        m_cap = max(0.5, allowed_max(m))
-        f_cap = max(0.5, allowed_max(f))
-
-        def clamp2(v, cap):
-            try:
-                v = float(v)
-            except Exception:
-                v = 1.0
-            if not np.isfinite(v):
-                v = 1.0
-            v = min(max(v, 0.5), cap)
-            return round(v, 2)
-
-        main_step = clamp2(main_step, m_cap)
-        fold_step = clamp2(fold_step, f_cap)
-
-        _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
-                                        d_fold=fold_step, d_main=main_step)
         H_dense = height_itp(pts)
         R_dense = outre_itp(pts)
         if include_pedestal:
@@ -637,46 +516,28 @@ def create_app():
     @app.callback(
         Output("download-data", "data"),
         Input("btn-download", "n_clicks"),
-        State("input-main-step", "value"),
-        State("input-fold-step", "value"),
+        State("main-factor", "value"),
+        State("fold-factor", "value"),
         State("pedestal-toggle", "value"),
         State("fold-angles", "data"),
         State("main-angles", "data"),
         prevent_initial_call=True,
     )
-    def download_interpolated(n_clicks, main_step, fold_step, pedestal_value, fold_angles_store, main_angles_store):
+    def download_interpolated(n_clicks, main_factor, fold_factor, pedestal_value, fold_angles_store, main_angles_store):
         if not n_clicks:
             return dash.no_update
 
-        m = np.array(main_angles_store, float)
+        main_factor = int(main_factor or 2)
+        fold_factor = int(fold_factor or 2)
+
         f = np.array(fold_angles_store, float)
+        m = np.array(main_angles_store, float)
 
-        def allowed_max(arr):
-            arr = np.unique(np.asarray(arr, dtype=float)); arr.sort()
-            gaps = np.diff(arr); gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
-            return float(np.max(gaps)) if gaps.size else 0.5
+        _, _, _, _, pts = resample_grid_by_factors(f, m, fold_factor, main_factor)
 
-        m_cap = max(0.5, allowed_max(m))
-        f_cap = max(0.5, allowed_max(f))
-
-        def clamp2(v, cap):
-            try:
-                v = float(v)
-            except Exception:
-                v = 1.0
-            if not np.isfinite(v):
-                v = 1.0
-            v = min(max(v, 0.5), cap)
-            return round(v, 2)
-
-        main_step = clamp2(main_step, m_cap)
-        fold_step = clamp2(fold_step, f_cap)
-
-        include_pedestal = "on" in (pedestal_value or [])
-        _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
-                                        d_fold=fold_step, d_main=main_step)
         H_dense = height_itp(pts)
         R_dense = outre_itp(pts)
+        include_pedestal = "on" in (pedestal_value or [])
         if include_pedestal:
             H_dense = H_dense + PEDESTAL_HEIGHT_M
 
@@ -685,8 +546,11 @@ def create_app():
             "MainJib_deg":    pts[:, 1],
             "Outreach_m":     R_dense,
             "Height_m":       H_dense,
-            "PedestalIncluded": include_pedestal,
+            "IncludePedestal": include_pedestal,
+            "MainSubdivisionFactor": main_factor,
+            "FoldingSubdivisionFactor": fold_factor,
         }).dropna()
+
         csv_bytes = df_out.to_csv(index=False).encode("utf-8")
         return dcc.send_bytes(lambda b: b.write(csv_bytes), filename="interpolated_envelope.csv")
 
