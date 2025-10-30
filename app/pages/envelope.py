@@ -1,134 +1,122 @@
-from dash import html, dcc, callback, Output, Input, State
-import plotly.graph_objects as go
+# app/pages/envelope.py
+import dash
+from dash import html, dcc, Input, Output
 import numpy as np
+import plotly.graph_objects as go
 
 from app.shared.data import get_context, resample_grid_by_factors
-from app.shared.data import compute_boundary_curve, _sample_points
+from app.shared.geom import compute_boundary_curve
 
-# Register page
-import dash
-dash.register_page(__name__, path="/envelope", name="140T main hoist envelope")
+dash.register_page(__name__, path="/envelope", name="Envelope")
 
 CTX = get_context()
+HEIGHT_ITP = CTX["height_itp"]
+OUTRE_ITP  = CTX["outre_itp"]
+LOAD_ITP   = CTX["load_itp"]
+FOLD_ANGLES = CTX["fold_angles"]
+MAIN_ANGLES = CTX["main_angles"]
 
-def factor_dropdown(id_, label, options, value):
-    return html.Div([
-        html.Label(label, style={"fontWeight": 600}),
-        dcc.Dropdown(
-            id=id_,
-            options=[{"label": f"{o}× per-interval" + (" (original)" if o == 1 else ""), "value": o} for o in options],
-            value=value, clearable=False, style={"marginBottom": "8px"}
+layout = html.Div(
+    [
+        html.H3("Operating Envelope (Outreach–Height)"),
+        html.Div(
+            [
+                html.Div(
+                    [
+                        html.Label("Folding Jib Interpolation"),
+                        dcc.Dropdown(
+                            id="env-fold-factor",
+                            options=[{"label": f"{f}x", "value": f} for f in [1, 2, 4, 8, 16]],
+                            value=1, clearable=False, style={"width": "150px"},
+                        ),
+                    ],
+                    style={"display": "inline-block", "marginRight": "24px"},
+                ),
+                html.Div(
+                    [
+                        html.Label("Main Jib Interpolation"),
+                        dcc.Dropdown(
+                            id="env-main-factor",
+                            options=[{"label": f"{f}x", "value": f} for f in [1, 2, 4, 8, 16]],
+                            value=1, clearable=False, style={"width": "150px"},
+                        ),
+                    ],
+                    style={"display": "inline-block", "marginRight": "24px"},
+                ),
+                html.Div(
+                    [
+                        html.Label("Boundary mode"),
+                        dcc.Dropdown(
+                            id="env-boundary-mode",
+                            options=[
+                                {"label": "None (points only)", "value": "none"},
+                                {"label": "Convex hull (fast, stable)", "value": "convex"},
+                                {"label": "Concave (fast approx)", "value": "concave"},
+                            ],
+                            value="none", clearable=False, style={"width": "260px"},
+                        ),
+                    ],
+                    style={"display": "inline-block"},
+                ),
+            ],
+            style={"marginBottom": "12px"},
         ),
-    ], style={"marginBottom": "8px"})
-
-controls = html.Div([
-    factor_dropdown("main-factor", "Main-jib subdivision", [1, 2, 4, 8], 1),
-    factor_dropdown("fold-factor", "Folding-jib subdivision", [1, 2, 4, 8, 16], 1),
-    html.Div(id="main-range", style={"fontFamily": "monospace"}),
-    html.Div(id="fold-range", style={"fontFamily": "monospace"}),
-    dcc.Checklist(
-        id="pedestal-toggle",
-        options=[{"label": f"Include pedestal height (+{CTX['PEDESTAL_HEIGHT_M']:.1f} m)", "value": "on"}],
-        value=["on"]
-    ),
-    html.Label("Envelope type", style={"fontWeight": 600}),
-    dcc.RadioItems(
-        id="envelope-type",
-        options=[
-            {"label": "None (points only)", "value": "none"},
-            {"label": "Concave (fast approx)", "value": "concave"},
-            {"label": "Convex hull (fast, stable)", "value": "convex"},
-        ],
-        value="convex", style={"marginTop": "4px"}
-    ),
-    html.Div(id="envelope-help", style={"fontSize": "12px", "color": "#555"}),
-], style={"flex": "0 0 340px", "overflowY": "auto", "height": "78vh",
-          "paddingRight": "12px", "borderRight": "1px solid #eee"})
-
-graph = html.Div([dcc.Graph(id="graph", style={"height": "78vh"})],
-                 style={"flex": "1 1 auto", "paddingLeft": "16px"})
-
-layout = html.Div([controls, graph], style={"display": "flex", "padding": "16px", "gap": "10px"})
-
-@callback(
-    Output("main-range", "children"),
-    Output("fold-range", "children"),
-    Input("main-factor", "value"),
-    Input("fold-factor", "value"),
+        dcc.Graph(id="env-graph", style={"height": "85vh"}),
+    ],
+    style={"padding": "20px"},
 )
-def show_ranges(_m, _f):
-    main_arr = CTX["main_angles"]
-    fold_arr = CTX["fold_angles"]
-    return (
-        f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}° (original points: {len(np.unique(main_arr))})",
-        f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}° (original points: {len(np.unique(fold_arr))})",
-    )
 
-@callback(Output("envelope-help", "children"), Input("envelope-type", "value"))
-def explain_envelope(kind):
-    if kind == "none":
-        return "Displays only points (no envelope). Useful for checking interpolation coverage."
-    if kind == "concave":
-        return "Concave alpha shape: tighter, realistic shape but sensitive to sparse data."
-    return "Convex hull: stable and conservative outer boundary."
-
-@callback(
-    Output("graph", "figure"),
-    Input("main-factor", "value"),
-    Input("fold-factor", "value"),
-    Input("pedestal-toggle", "value"),
-    Input("envelope-type", "value"),
+@dash.callback(
+    Output("env-graph", "figure"),
+    Input("env-fold-factor", "value"),
+    Input("env-main-factor", "value"),
+    Input("env-boundary-mode", "value"),
 )
-def update_figure(main_factor, fold_factor, pedestal_value, envelope_value):
-    include_pedestal = "on" in (pedestal_value or [])
-    prefer_concave = (envelope_value == "concave")
-    draw_envelope = (envelope_value != "none")
+def update_env(fold_factor, main_factor, boundary_mode):
+    # Build the angle grid and sample
+    fnew, mnew, F, M, pts = resample_grid_by_factors(FOLD_ANGLES, MAIN_ANGLES, fold_factor, main_factor)
+    height_vals = HEIGHT_ITP(pts)
+    outre_vals  = OUTRE_ITP(pts)
+    load_vals   = LOAD_ITP(pts)
 
-    main_factor = int(main_factor or 1)
-    fold_factor = int(fold_factor or 1)
+    # Convert to XY = (Outreach, Height)
+    X = outre_vals
+    Y = height_vals
+    L = load_vals
 
-    f = CTX["fold_angles"]
-    m = CTX["main_angles"]
-    _, _, _, _, pts = resample_grid_by_factors(f, m, fold_factor, main_factor)
-
-    H_dense = CTX["height_itp"](pts)
-    R_dense = CTX["outre_itp"](pts)
-    if include_pedestal:
-        H_dense = H_dense + CTX["PEDESTAL_HEIGHT_M"]
-
-    dense_xy = np.column_stack([R_dense, H_dense])
-    dense_xy = dense_xy[~np.isnan(dense_xy).any(axis=1)]
-
-    envelope_xy = None
-    if draw_envelope:
-        envelope_xy = compute_boundary_curve(
-            _sample_points(dense_xy, CTX["MAX_POINTS_FOR_ENVELOPE"]),
-            prefer_concave=prefer_concave
-        )
+    # Filter invalids
+    mask = np.isfinite(X) & np.isfinite(Y) & np.isfinite(L)
+    X, Y, L = X[mask], Y[mask], L[mask]
 
     fig = go.Figure()
 
-    dense_for_plot = _sample_points(dense_xy, CTX["MAX_POINTS_FOR_DISPLAY"])
-    if dense_for_plot.size:
-        fig.add_trace(go.Scatter(
-            x=dense_for_plot[:, 0], y=dense_for_plot[:, 1],
-            mode="markers", marker=dict(size=4, symbol="diamond", opacity=0.5),
-            name="Interpolated points",
-            hovertemplate="Outreach: %{x:.2f} m<br>Height: %{y:.2f} m<extra></extra>"
-        ))
+    # Points (colored by load)
+    fig.add_trace(
+        go.Scattergl(
+            x=X, y=Y, mode="markers",
+            marker=dict(size=5, color=L, colorscale="Viridis", colorbar=dict(title="Load [t]")),
+            name="Samples",
+        )
+    )
 
-    if envelope_xy is not None and len(envelope_xy) > 2:
-        fig.add_trace(go.Scatter(
-            x=envelope_xy[:, 0], y=envelope_xy[:, 1],
-            mode="lines", line=dict(width=3), name="Envelope",
-        ))
+    # Optional boundary overlay
+    if boundary_mode != "none":
+        boundary = compute_boundary_curve(np.c_[X, Y], mode=boundary_mode, alpha=1.2)
+        if boundary.size > 0:
+            fig.add_trace(
+                go.Scatter(
+                    x=boundary[:, 0], y=boundary[:, 1],
+                    mode="lines+markers", line=dict(width=2),
+                    name=f"Boundary: {boundary_mode}",
+                )
+            )
 
     fig.update_layout(
         xaxis_title="Outreach [m]",
-        yaxis_title="Jib head height [m]" if include_pedestal else "Jib head above pedestal flange [m]",
+        yaxis_title="Height [m]",
         template="plotly_white",
-        legend=dict(orientation="h", yanchor="top", y=1.02, xanchor="left", x=0),
-        margin=dict(l=40, r=20, t=60, b=40),
-        uirevision="keep",
+        margin=dict(l=60, r=20, t=40, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        title=f"Envelope — Fold {fold_factor}x, Main {main_factor}x, Boundary: {boundary_mode}",
     )
     return fig
