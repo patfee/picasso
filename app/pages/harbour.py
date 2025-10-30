@@ -3,20 +3,21 @@ from dash import html, dcc, Input, Output
 import numpy as np
 import plotly.graph_objects as go
 
-from app.shared.data import (
-    get_context,
-    resample_grid_by_factors,
-    expand_angles_by_factor,
-)
-from app.shared.geom import compute_boundary_curve  # safe to keep if defined
+from app.shared.data import get_context, resample_grid_by_factors
+
+# Optional import (only if geom.py exists — otherwise safe to keep)
+try:
+    from app.shared.geom import compute_boundary_curve
+except ImportError:
+    compute_boundary_curve = None
 
 # --------------------------------------------------------------------
-# Dash Page Registration
+# Page Registration
 # --------------------------------------------------------------------
 dash.register_page(__name__, path="/harbour", name="Harbour Mode")
 
 # --------------------------------------------------------------------
-# Load context (shared interpolators, dataframes, constants)
+# Shared Data Context
 # --------------------------------------------------------------------
 CTX = get_context()
 LOAD_ITP = CTX["load_itp"]
@@ -31,6 +32,7 @@ MAIN_ANGLES = CTX["main_angles"]
 layout = html.Div(
     [
         html.H3("Harbour Mode — Load Capacity Heatmap (Cdyn=1.15)"),
+
         html.Div(
             [
                 html.Div(
@@ -38,44 +40,38 @@ layout = html.Div(
                         html.Label("Folding Jib Interpolation"),
                         dcc.Dropdown(
                             id="harbour-fold-factor",
-                            options=[
-                                {"label": f"{f}x", "value": f}
-                                for f in [1, 2, 4, 8, 16]
-                            ],
+                            options=[{"label": f"{f}x", "value": f} for f in [1, 2, 4, 8, 16]],
                             value=1,
                             clearable=False,
                             style={"width": "150px"},
                         ),
                     ],
-                    style={"display": "inline-block", "marginRight": "30px"},
+                    style={"display": "inline-block", "marginRight": "24px"},
                 ),
                 html.Div(
                     [
                         html.Label("Main Jib Interpolation"),
                         dcc.Dropdown(
                             id="harbour-main-factor",
-                            options=[
-                                {"label": f"{f}x", "value": f}
-                                for f in [1, 2, 4, 8, 16]
-                            ],
+                            options=[{"label": f"{f}x", "value": f} for f in [1, 2, 4, 8, 16]],
                             value=1,
                             clearable=False,
                             style={"width": "150px"},
                         ),
                     ],
-                    style={"display": "inline-block"},
+                    style={"display": "inline-block", "marginRight": "24px"},
                 ),
             ],
             style={"marginBottom": "15px"},
         ),
+
         dcc.Graph(id="harbour-heatmap", style={"height": "85vh"}),
     ],
     style={"padding": "20px"},
 )
 
-
 # --------------------------------------------------------------------
-# Callbacks
+# Callback — updates the interpolated heatmap
 # --------------------------------------------------------------------
 @dash.callback(
     Output("harbour-heatmap", "figure"),
@@ -84,24 +80,25 @@ layout = html.Div(
 )
 def update_heatmap(fold_factor, main_factor):
     """
-    Recompute interpolated grid & update heatmap.
+    Interpolate load matrix over expanded angle grids
+    and plot as a smooth contour heatmap.
     """
-    # Generate extended grid (keeps original angle points)
+    # Generate expanded angle grid
     fnew, mnew, F, M, pts = resample_grid_by_factors(
         FOLD_ANGLES, MAIN_ANGLES, fold_factor, main_factor
     )
 
-    # Interpolate load, height, and outreach on same grid
+    # Interpolate
     load_vals = LOAD_ITP(pts)
     height_vals = HEIGHT_ITP(pts)
     outre_vals = OUTRE_ITP(pts)
 
-    # reshape back to 2D grids
+    # Reshape to 2D
     LOAD = load_vals.reshape(F.shape)
     HEIGHT = height_vals.reshape(F.shape)
     OUTRE = outre_vals.reshape(F.shape)
 
-    # We’ll use OUTRE on X axis, HEIGHT on Y, LOAD as color
+    # Build the contour plot
     fig = go.Figure(
         data=go.Contour(
             x=np.nanmean(OUTRE, axis=0),
@@ -120,10 +117,9 @@ def update_heatmap(fold_factor, main_factor):
     fig.update_layout(
         xaxis_title="Outreach [m]",
         yaxis_title="Height [m]",
-        title=f"Interpolated Load Capacity Heatmap — Fold {fold_factor}x, Main {main_factor}x",
+        title=f"Interpolated Load Capacity — Fold {fold_factor}x, Main {main_factor}x",
         template="plotly_white",
         margin=dict(l=60, r=20, t=50, b=50),
     )
 
-    fig.update_yaxes(scaleanchor=None, scaleratio=1)  # free aspect ratio
     return fig
