@@ -5,7 +5,7 @@ import pandas as pd
 from scipy.interpolate import griddata
 
 from app.shared.data import get_context, resample_grid_by_factors
-from ..shared.geom import compute_boundary_curve
+from app.shared.data import compute_boundary_curve
 
 import dash
 dash.register_page(__name__, path="/harbour", name="Harbour Mode")
