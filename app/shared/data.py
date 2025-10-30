@@ -20,6 +20,9 @@ MAX_POINTS_FOR_KNN      = 1200
 KNN_K                   = 8
 
 
+# ---------------------------------------------------------------------------
+# CSV Loading
+# ---------------------------------------------------------------------------
 def _sniff_delimiter(sample: str) -> str:
     try:
         return csv.Sniffer().sniff(sample, delimiters=[",", ";", "\t"]).delimiter
@@ -75,6 +78,29 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
     return df
 
 
+# ---------------------------------------------------------------------------
+# Interpolation Helpers
+# ---------------------------------------------------------------------------
+def expand_angles_by_factor(sorted_angles: np.ndarray, factor: int) -> np.ndarray:
+    """
+    Per-interval subdivision that ALWAYS includes the original CSV angles.
+    For each consecutive pair (a,b), generate 'factor' equal sub-intervals:
+      np.linspace(a, b, factor+1), and skip the first (to avoid duplicates).
+    If factor <= 1, return the original array unchanged.
+    """
+    arr = np.unique(np.asarray(sorted_angles, dtype=float))
+    arr.sort()
+    if len(arr) < 2 or int(factor) <= 1:
+        return arr.copy()
+
+    out = [arr[0]]
+    for i in range(len(arr) - 1):
+        a, b = arr[i], arr[i + 1]
+        seg = np.linspace(a, b, int(factor) + 1, endpoint=True)[1:]
+        out.extend(seg.tolist())
+    return np.array(out, dtype=float)
+
+
 def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame, load_df: pd.DataFrame):
     # Align to same angle axes
     fold_angles = height_df.index.values.astype(float)
@@ -90,25 +116,16 @@ def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame, load
 
 
 def resample_grid_by_factors(fold_angles, main_angles, fold_factor, main_factor):
-    def expand(arr, f):
-        arr = np.unique(np.asarray(arr, float))
-        arr.sort()
-        if len(arr) < 2 or int(f) <= 1:
-            return arr
-        out = [arr[0]]
-        for i in range(len(arr) - 1):
-            a, b = arr[i], arr[i + 1]
-            seg = np.linspace(a, b, int(f) + 1, endpoint=True)[1:]  # keep originals, add equal subdivisions
-            out.extend(seg.tolist())
-        return np.array(out, float)
-
-    fnew = expand(fold_angles, fold_factor)
-    mnew = expand(main_angles, main_factor)
+    fnew = expand_angles_by_factor(fold_angles, fold_factor)
+    mnew = expand_angles_by_factor(main_angles, main_factor)
     F, M = np.meshgrid(fnew, mnew, indexing="ij")
     pts = np.column_stack([F.ravel(), M.ravel()])  # [Folding, Main]
     return fnew, mnew, F, M, pts
 
 
+# ---------------------------------------------------------------------------
+# Cached context for shared use
+# ---------------------------------------------------------------------------
 @lru_cache(maxsize=1)
 def get_context():
     """
