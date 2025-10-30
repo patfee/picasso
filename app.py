@@ -9,7 +9,7 @@ import dash
 from dash import dcc, html, Input, Output, State, dash_table
 import plotly.graph_objects as go
 
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import RegularGridInterpolator, griddata
 import shapely.geometry as sgeom
 import alphashape
 
@@ -20,15 +20,16 @@ import alphashape
 DATA_DIR = os.getenv("DATA_DIR", "./data")
 HEIGHT_CSV = os.getenv("HEIGHT_CSV", "height.csv")
 OUTREACH_CSV = os.getenv("OUTREACH_CSV", "outreach.csv")
+LOAD_CSV = os.getenv("LOAD_CSV", "Harbour_Cdyn115.csv")  # <--- NEW
 PEDESTAL_HEIGHT_M = float(os.getenv("PEDESTAL_HEIGHT_M", "6"))
 LOGO_URL = os.getenv("LOGO_URL", "/assets/dcn_logo.svg")
 ASSETS_DIR = os.getenv("ASSETS_DIR", "./assets")
 
 # Display/perf caps
-MAX_POINTS_FOR_DISPLAY  = 15000   # Plotly drawing cap
-MAX_POINTS_FOR_ENVELOPE = 6000    # Geometry calc subset cap (lower = faster)
-MAX_POINTS_FOR_KNN      = 1200    # Subset size for alpha estimation
-KNN_K                   = 8        # Neighbour count for distance heuristic
+MAX_POINTS_FOR_DISPLAY  = 15000
+MAX_POINTS_FOR_ENVELOPE = 6000
+MAX_POINTS_FOR_KNN      = 1200
+KNN_K                   = 8
 
 
 # =========================
@@ -109,12 +110,6 @@ def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame):
 
 
 def expand_angles_by_factor(sorted_angles: np.ndarray, factor: int) -> np.ndarray:
-    """
-    Per-interval subdivision that ALWAYS includes the original CSV angles.
-    For each consecutive pair (a,b), generate 'factor' equal sub-intervals:
-      np.linspace(a, b, factor+1), and skip the first (to avoid duplicates).
-    If factor <= 1, return the original array unchanged.
-    """
     arr = np.unique(np.asarray(sorted_angles, dtype=float))
     arr.sort()
     if len(arr) < 2 or int(factor) <= 1:
@@ -155,12 +150,6 @@ def _near_collinear(pts: np.ndarray) -> bool:
 
 
 def _estimate_alpha(pts: np.ndarray, k: int = KNN_K) -> float:
-    """
-    Fast heuristic alpha:
-    - take up to MAX_POINTS_FOR_KNN points
-    - compute median distance to k-th nearest neighbour
-    - alpha ~ 1 / (c * d_k)
-    """
     pts = _sample_points(pts, MAX_POINTS_FOR_KNN)
     if len(pts) < k + 2:
         return 1.0
@@ -233,17 +222,12 @@ def make_figure(orig_xy: np.ndarray,
                 include_pedestal: bool,
                 dense_custom=None,
                 orig_custom=None):
-    """
-    dense_custom / orig_custom: arrays shaped (N, 2) with columns:
-      [FoldingAngle, MainAngle]
-    """
     fig = go.Figure()
     dense_for_plot = _sample_points(dense_xy, MAX_POINTS_FOR_DISPLAY)
     dense_custom_plot = None
     if dense_custom is not None and len(dense_custom) == len(dense_xy):
         dense_custom_plot = _sample_points(dense_custom, MAX_POINTS_FOR_DISPLAY)
 
-    # Hover template
     pedestal_str = "yes" if include_pedestal else "no"
     hover_tmpl = (
         "Main Jib: %{customdata[1]:.2f} deg, Folding Jib: %{customdata[0]:.2f} deg<br>"
@@ -263,7 +247,6 @@ def make_figure(orig_xy: np.ndarray,
         ))
 
     if orig_xy.size:
-        # For originals we also show angles via customdata
         fig.add_trace(go.Scatter(
             x=orig_xy[:, 0],
             y=orig_xy[:, 1] + (PEDESTAL_HEIGHT_M if include_pedestal else 0.0),
@@ -293,9 +276,6 @@ def make_figure(orig_xy: np.ndarray,
 
 
 def df_to_dash_table(df: pd.DataFrame, title: str, table_id: str):
-    """
-    Render a DataTable with folding angles as first column and main-angle columns.
-    """
     display_df = df.copy()
     display_df.index.name = "Folding°"
     display_df = display_df.reset_index()
@@ -328,17 +308,21 @@ def create_app():
     # Load data
     height_df = load_matrix_csv(os.path.join(DATA_DIR, HEIGHT_CSV))
     outreach_df = load_matrix_csv(os.path.join(DATA_DIR, OUTREACH_CSV))
+    load_df = load_matrix_csv(os.path.join(DATA_DIR, LOAD_CSV))  # <--- NEW
+    # Align load df to the exact angle axes (if needed)
+    load_df = load_df.reindex(index=height_df.index, columns=height_df.columns)
+
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
 
     # Original points X-Y and their angle customdata for hovers
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
-    F0, M0 = np.meshgrid(fold_angles, main_angles, indexing="ij")  # shapes match dataframes
+    F0, M0 = np.meshgrid(fold_angles, main_angles, indexing="ij")
     orig_custom = np.column_stack([F0.ravel(), M0.ravel()])  # [Folding, Main]
 
     # Shared Stores
     stores = html.Div([
         dcc.Store(id="orig-xy", data=orig_xy.tolist()),
-        dcc.Store(id="orig-angles", data=orig_custom.tolist()),  # for hover on originals
+        dcc.Store(id="orig-angles", data=orig_custom.tolist()),
         dcc.Store(id="fold-angles", data=fold_angles.tolist()),
         dcc.Store(id="main-angles", data=main_angles.tolist()),
     ])
@@ -347,6 +331,8 @@ def create_app():
     sidebar = html.Div([
         html.H3("Menu", style={"marginTop": 0}),
         dcc.Link("140T main hoist envelope", href="/envelope", className="nav-link"),
+        html.Br(),
+        dcc.Link("Harbour Mode", href="/harbour", className="nav-link"),  # <--- NEW (between)
         html.Br(),
         dcc.Link("Test", href="/test", className="nav-link"),
         html.Br(),
@@ -428,7 +414,6 @@ def create_app():
     envelope_graph = html.Div(
         [
             dcc.Graph(id="graph", style={"height": "78vh"}),
-            # --- Matrices underneath the curve ---
             html.Div([
                 df_to_dash_table(height_df, "Reference Matrix — Height [m]", "tbl-height"),
                 html.Button("Download Height CSV", id="btn-height-csv", style={"margin": "8px 0 24px 0"}),
@@ -447,9 +432,10 @@ def create_app():
         style={"display": "flex", "padding": "16px", "gap": "10px"}
     )
 
+    # Test page
     test_page = html.Div([html.H3("Test Page"), html.P("Placeholder for future content.")], style={"padding": "16px"})
 
-    # --- NEW: TTS Data page ---
+    # --- TTS Data page (existing from earlier step) ---
     tts_page = html.Div([
         html.H3("TTS Data", style={"marginTop": 0}),
         html.P("Download the TTS crane GA and load charts PDFs below."),
@@ -464,14 +450,20 @@ def create_app():
             dcc.Download(id="download-tts-charts"),
         ]),
         html.Hr(),
-        html.P("Tip: these files are also served directly from /assets if you ever want to link them."),
         html.Ul([
             html.Li(html.A("Open GA (inline)", href="/assets/Picasso_TTS_140_Tons_CraneGA.pdf", target="_blank")),
             html.Li(html.A("Open Load Charts (inline)", href="/assets/140Tons_TTS_Crane_load_charts.pdf", target="_blank")),
         ]),
     ], style={"padding": "16px"})
 
-    # Render envelope page immediately so components exist at startup
+    # --- NEW: Harbour Mode page (simple heatmap) ---
+    harbour_page = html.Div([
+        html.H3("Harbour Mode (Cdyn 1.15)", style={"marginTop": 0}),
+        html.P("Heatmap of Load [t] over the geometric plane (Outreach × Height) derived from the TTS matrices."),
+        dcc.Graph(id="harbour-heatmap", style={"height": "78vh"}),
+    ], style={"padding": "16px"})
+
+    # Initial content
     content = html.Div(id="page-content", style={"width": "100%"}, children=envelope_page)
 
     app.layout = html.Div([
@@ -487,6 +479,8 @@ def create_app():
     def route(pathname: str):
         if pathname in ("/", "/envelope", None):
             return envelope_page
+        elif pathname == "/harbour":
+            return harbour_page
         elif pathname == "/test":
             return test_page
         elif pathname == "/tts":
@@ -521,7 +515,7 @@ def create_app():
             return "Concave alpha shape: tighter, realistic shape but sensitive to sparse data."
         return "Convex hull: stable and conservative outer boundary."
 
-    # Graph update (drive from dropdown factors)
+    # Graph update (envelope)
     @app.callback(
         Output("graph", "figure"),
         Input("main-factor", "value"),
@@ -627,7 +621,7 @@ def create_app():
         csv_bytes = df_out.to_csv(index=False).encode("utf-8")
         return dcc.send_bytes(lambda b: b.write(csv_bytes), filename="interpolated_envelope.csv")
 
-    # --- NEW: TTS Data downloads ---
+    # --- TTS Data downloads ---
     @app.callback(
         Output("download-tts-ga", "data"),
         Input("btn-tts-ga", "n_clicks"),
@@ -649,6 +643,60 @@ def create_app():
         with open(path, "rb") as f:
             data = f.read()
         return dcc.send_bytes(lambda b: b.write(data), filename="140Tons_TTS_Crane_load_charts.pdf")
+
+    # --- NEW: Harbour heatmap figure ---
+    @app.callback(
+        Output("harbour-heatmap", "figure"),
+        Input("url", "pathname"),
+        prevent_initial_call=False,
+    )
+    def draw_harbour_heatmap(_):
+        # Source points in (R, H) with Z = Load
+        R = outreach_df.values.ravel()
+        H = height_df.values.ravel()
+        Z = load_df.values.ravel()
+
+        mask = np.isfinite(R) & np.isfinite(H) & np.isfinite(Z)
+        R, H, Z = R[mask], H[mask], Z[mask]
+
+        if len(Z) < 4:
+            # Fallback empty fig
+            fig = go.Figure()
+            fig.update_layout(template="plotly_white", xaxis_title="Outreach [m]", yaxis_title="Height [m]")
+            return fig
+
+        # Build a regular grid in geometric space
+        r_min, r_max = float(np.min(R)), float(np.max(R))
+        h_min, h_max = float(np.min(H)), float(np.max(H))
+        # 200x200 keeps it smooth without being heavy
+        r_lin = np.linspace(r_min, r_max, 200)
+        h_lin = np.linspace(h_min, h_max, 200)
+        RR, HH = np.meshgrid(r_lin, h_lin)
+
+        # Interpolate Z onto the (R,H) grid (linear then nearest to fill holes)
+        Z_grid = griddata(points=np.column_stack([R, H]), values=Z, xi=(RR, HH), method="linear")
+        # Fill NaNs (outside convex hull) with nearest
+        if np.isnan(Z_grid).any():
+            Z_nn = griddata(points=np.column_stack([R, H]), values=Z, xi=(RR, HH), method="nearest")
+            Z_grid = np.where(np.isnan(Z_grid), Z_nn, Z_grid)
+
+        fig = go.Figure(data=go.Heatmap(
+            x=r_lin,
+            y=h_lin,
+            z=Z_grid,
+            colorbar=dict(title="Load [t]"),
+            hovertemplate="Outreach: %{x:.2f} m<br>Height: %{y:.2f} m<br>Load: %{z:.2f} t<extra></extra>",
+            zsmooth=False
+        ))
+        fig.update_layout(
+            template="plotly_white",
+            xaxis_title="Outreach [m]",
+            yaxis_title="Height [m]",
+            title="Harbour Mode — Load Capacity [t] (Cdyn 1.15)",
+            margin=dict(l=50, r=20, t=50, b=40),
+            uirevision="keep",
+        )
+        return fig
 
     return app, server
 
