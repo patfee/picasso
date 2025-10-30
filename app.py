@@ -22,6 +22,7 @@ HEIGHT_CSV = os.getenv("HEIGHT_CSV", "height.csv")
 OUTREACH_CSV = os.getenv("OUTREACH_CSV", "outreach.csv")
 PEDESTAL_HEIGHT_M = float(os.getenv("PEDESTAL_HEIGHT_M", "6"))
 LOGO_URL = os.getenv("LOGO_URL", "/assets/dcn_logo.svg")
+ASSETS_DIR = os.getenv("ASSETS_DIR", "./assets")
 
 # Display/perf caps
 MAX_POINTS_FOR_DISPLAY  = 15000   # Plotly drawing cap
@@ -348,6 +349,8 @@ def create_app():
         dcc.Link("140T main hoist envelope", href="/envelope", className="nav-link"),
         html.Br(),
         dcc.Link("Test", href="/test", className="nav-link"),
+        html.Br(),
+        dcc.Link("TTS Data", href="/tts", className="nav-link"),
     ], style={
         "position": "sticky", "top": "0px", "height": "100vh",
         "padding": "16px", "borderRight": "1px solid #e5e7eb", "background": "#fafafa",
@@ -446,6 +449,28 @@ def create_app():
 
     test_page = html.Div([html.H3("Test Page"), html.P("Placeholder for future content.")], style={"padding": "16px"})
 
+    # --- NEW: TTS Data page ---
+    tts_page = html.Div([
+        html.H3("TTS Data", style={"marginTop": 0}),
+        html.P("Download the TTS crane GA and load charts PDFs below."),
+        html.Div([
+            html.Button("Download: Picasso_TTS_140_Tons_CraneGA.pdf", id="btn-tts-ga", n_clicks=0,
+                        style={"marginRight": "8px", "marginBottom": "8px"}),
+            dcc.Download(id="download-tts-ga"),
+        ]),
+        html.Div([
+            html.Button("Download: 140Tons_TTS_Crane_load_charts.pdf", id="btn-tts-charts", n_clicks=0,
+                        style={"marginRight": "8px", "marginBottom": "8px"}),
+            dcc.Download(id="download-tts-charts"),
+        ]),
+        html.Hr(),
+        html.P("Tip: these files are also served directly from /assets if you ever want to link them."),
+        html.Ul([
+            html.Li(html.A("Open GA (inline)", href="/assets/Picasso_TTS_140_Tons_CraneGA.pdf", target="_blank")),
+            html.Li(html.A("Open Load Charts (inline)", href="/assets/140Tons_TTS_Crane_load_charts.pdf", target="_blank")),
+        ]),
+    ], style={"padding": "16px"})
+
     # Render envelope page immediately so components exist at startup
     content = html.Div(id="page-content", style={"width": "100%"}, children=envelope_page)
 
@@ -464,6 +489,8 @@ def create_app():
             return envelope_page
         elif pathname == "/test":
             return test_page
+        elif pathname == "/tts":
+            return tts_page
         return html.Div([html.H3("404"), html.P(f"Path not found: {pathname}")], style={"padding": "16px"})
 
     # Ranges text
@@ -549,7 +576,7 @@ def create_app():
             orig_custom=orig_custom
         )
 
-    # Downloads
+    # Downloads (matrices)
     @app.callback(Output("download-height", "data"), Input("btn-height-csv", "n_clicks"), prevent_initial_call=True)
     def download_height_matrix(n):
         return dcc.send_data_frame(height_df.to_csv, "height_matrix.csv")
@@ -558,6 +585,7 @@ def create_app():
     def download_outreach_matrix(n):
         return dcc.send_data_frame(outreach_df.to_csv, "outreach_matrix.csv")
 
+    # Download (interpolated envelope CSV)
     @app.callback(
         Output("download-data", "data"),
         Input("btn-download", "n_clicks"),
@@ -598,6 +626,29 @@ def create_app():
 
         csv_bytes = df_out.to_csv(index=False).encode("utf-8")
         return dcc.send_bytes(lambda b: b.write(csv_bytes), filename="interpolated_envelope.csv")
+
+    # --- NEW: TTS Data downloads ---
+    @app.callback(
+        Output("download-tts-ga", "data"),
+        Input("btn-tts-ga", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def download_tts_ga(n_clicks):
+        path = os.path.join(ASSETS_DIR, "Picasso_TTS_140_Tons_CraneGA.pdf")
+        with open(path, "rb") as f:
+            data = f.read()
+        return dcc.send_bytes(lambda b: b.write(data), filename="Picasso_TTS_140_Tons_CraneGA.pdf")
+
+    @app.callback(
+        Output("download-tts-charts", "data"),
+        Input("btn-tts-charts", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def download_tts_charts(n_clicks):
+        path = os.path.join(ASSETS_DIR, "140Tons_TTS_Crane_load_charts.pdf")
+        with open(path, "rb") as f:
+            data = f.read()
+        return dcc.send_bytes(lambda b: b.write(data), filename="140Tons_TTS_Crane_load_charts.pdf")
 
     return app, server
 
