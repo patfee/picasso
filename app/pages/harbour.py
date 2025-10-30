@@ -4,8 +4,14 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
 
-from app.shared.data import get_context, resample_grid_by_factors
-from app.shared.data import compute_boundary_curve
+from app.shared.data import (
+    load_matrix_csv,
+    build_interpolators,
+    resample_grid_by_factors,
+    expand_angles_by_factor,
+    # ...whatever other data helpers you use
+)
+from app.shared.geom import compute_boundary_curve
 
 import dash
 dash.register_page(__name__, path="/harbour", name="Harbour Mode")
