@@ -110,18 +110,18 @@ def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame):
 def expand_angles_by_factor(sorted_angles: np.ndarray, factor: int) -> np.ndarray:
     """
     Per-interval subdivision that ALWAYS includes the original CSV angles.
-    For each consecutive pair (a,b), generate 'factor' equal sub-intervals, i.e.,
-    np.linspace(a, b, factor+1). All originals are preserved; last endpoint is included once.
+    For each consecutive pair (a,b), generate 'factor' equal sub-intervals:
+      np.linspace(a, b, factor+1), and skip the first (to avoid duplicates).
+    If factor <= 1, return the original array unchanged.
     """
     arr = np.unique(np.asarray(sorted_angles, dtype=float))
     arr.sort()
-    if len(arr) < 2 or factor <= 1:
+    if len(arr) < 2 or int(factor) <= 1:
         return arr.copy()
 
     out = [arr[0]]
     for i in range(len(arr) - 1):
         a, b = arr[i], arr[i + 1]
-        # factor+1 points between a..b inclusive; skip the first to avoid duplicates
         seg = np.linspace(a, b, int(factor) + 1, endpoint=True)[1:]
         out.extend(seg.tolist())
     return np.array(out, dtype=float)
@@ -132,7 +132,7 @@ def resample_grid_by_factors(fold_angles: np.ndarray, main_angles: np.ndarray,
     fnew = expand_angles_by_factor(fold_angles, fold_factor)
     mnew = expand_angles_by_factor(main_angles, main_factor)
     F, M = np.meshgrid(fnew, mnew, indexing="ij")
-    pts = np.column_stack([F.ravel(), M.ravel()])
+    pts = np.column_stack([F.ravel(), M.ravel()])  # [Folding, Main]
     return fnew, mnew, F, M, pts
 
 
@@ -226,25 +226,53 @@ def compute_boundary_curve(xy_points: np.ndarray, prefer_concave: bool = True):
     return None
 
 
-def make_figure(orig_xy: np.ndarray, dense_xy: np.ndarray, boundary_xy, include_pedestal: bool):
+def make_figure(orig_xy: np.ndarray,
+                dense_xy: np.ndarray,
+                boundary_xy,
+                include_pedestal: bool,
+                dense_custom=None,
+                orig_custom=None):
+    """
+    dense_custom / orig_custom: arrays shaped (N, 2) with columns:
+      [FoldingAngle, MainAngle]
+    """
     fig = go.Figure()
     dense_for_plot = _sample_points(dense_xy, MAX_POINTS_FOR_DISPLAY)
+    dense_custom_plot = None
+    if dense_custom is not None and len(dense_custom) == len(dense_xy):
+        dense_custom_plot = _sample_points(dense_custom, MAX_POINTS_FOR_DISPLAY)
+
+    # Hover template
+    pedestal_str = "yes" if include_pedestal else "no"
+    hover_tmpl = (
+        "Main Jib: %{customdata[1]:.2f} deg, Folding Jib: %{customdata[0]:.2f} deg<br>"
+        "Outreach: %{x:.2f} m, Height: %{y:.2f} m<br>"
+        f"Pedestal: {pedestal_str}<extra></extra>"
+    )
 
     if dense_for_plot.size:
         fig.add_trace(go.Scatter(
-            x=dense_for_plot[:, 0], y=dense_for_plot[:, 1],
+            x=dense_for_plot[:, 0],
+            y=dense_for_plot[:, 1],
             mode="markers",
             marker=dict(size=4, symbol="diamond", opacity=0.5),
             name="Interpolated points",
+            customdata=dense_custom_plot,
+            hovertemplate=hover_tmpl if dense_custom_plot is not None else None,
         ))
+
     if orig_xy.size:
+        # For originals we also show angles via customdata
         fig.add_trace(go.Scatter(
             x=orig_xy[:, 0],
             y=orig_xy[:, 1] + (PEDESTAL_HEIGHT_M if include_pedestal else 0.0),
             mode="markers",
             marker=dict(size=8),
             name="Original matrix points",
+            customdata=orig_custom,
+            hovertemplate=hover_tmpl if orig_custom is not None else None,
         ))
+
     if boundary_xy is not None and len(boundary_xy) > 2:
         fig.add_trace(go.Scatter(
             x=boundary_xy[:, 0], y=boundary_xy[:, 1],
@@ -300,11 +328,16 @@ def create_app():
     height_df = load_matrix_csv(os.path.join(DATA_DIR, HEIGHT_CSV))
     outreach_df = load_matrix_csv(os.path.join(DATA_DIR, OUTREACH_CSV))
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
+
+    # Original points X-Y and their angle customdata for hovers
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
+    F0, M0 = np.meshgrid(fold_angles, main_angles, indexing="ij")  # shapes match dataframes
+    orig_custom = np.column_stack([F0.ravel(), M0.ravel()])  # [Folding, Main]
 
     # Shared Stores
     stores = html.Div([
         dcc.Store(id="orig-xy", data=orig_xy.tolist()),
+        dcc.Store(id="orig-angles", data=orig_custom.tolist()),  # for hover on originals
         dcc.Store(id="fold-angles", data=fold_angles.tolist()),
         dcc.Store(id="main-angles", data=main_angles.tolist()),
     ])
@@ -337,7 +370,7 @@ def create_app():
             html.Label(label, style={"fontWeight": 600}),
             dcc.Dropdown(
                 id=id_,
-                options=[{"label": f"{o}× per-interval", "value": o} for o in options],
+                options=[{"label": f"{o}× per-interval" + (" (original)" if o == 1 else ""), "value": o} for o in options],
                 value=value,
                 clearable=False,
                 style={"marginBottom": "8px"}
@@ -345,8 +378,8 @@ def create_app():
         ], style={"marginBottom": "8px"})
 
     envelope_controls = html.Div([
-        factor_dropdown("main-factor", "Main-jib subdivision", [2, 4, 8], 4),
-        factor_dropdown("fold-factor", "Folding-jib subdivision", [2, 4, 8, 16], 4),
+        factor_dropdown("main-factor", "Main-jib subdivision", [1, 2, 4, 8], 1),
+        factor_dropdown("fold-factor", "Folding-jib subdivision", [1, 2, 4, 8, 16], 1),
 
         html.Div(id="main-range", style={"marginTop": "2px", "fontFamily": "monospace", "color": "#444"}),
         html.Div(id="fold-range", style={"marginTop": "2px", "fontFamily": "monospace", "color": "#444"}),
@@ -472,17 +505,17 @@ def create_app():
         Input("pedestal-toggle", "value"),
         Input("envelope-type", "value"),
         State("orig-xy", "data"),
+        State("orig-angles", "data"),
         State("fold-angles", "data"),
         State("main-angles", "data"),
     )
     def update_figure(main_factor, fold_factor, pedestal_value, envelope_value,
-                      orig_xy_store, fold_angles_store, main_angles_store):
+                      orig_xy_store, orig_angles_store, fold_angles_store, main_angles_store):
         include_pedestal = "on" in (pedestal_value or [])
         prefer_concave = (envelope_value == "concave")
 
-        # Fallbacks
-        main_factor = int(main_factor or 2)
-        fold_factor = int(fold_factor or 2)
+        main_factor = int(main_factor or 1)
+        fold_factor = int(fold_factor or 1)
 
         f = np.array(fold_angles_store, float)
         m = np.array(main_angles_store, float)
@@ -496,13 +529,25 @@ def create_app():
 
         dense_xy = np.column_stack([R_dense, H_dense])
         dense_xy = dense_xy[~np.isnan(dense_xy).any(axis=1)]
+        dense_custom = pts  # [Folding, Main] for hover
+
+        # Originals
+        orig_xy = np.array(orig_xy_store, dtype=float)
+        orig_custom = np.array(orig_angles_store, dtype=float)
 
         envelope_xy = compute_boundary_curve(
             _sample_points(dense_xy, MAX_POINTS_FOR_ENVELOPE),
             prefer_concave=prefer_concave
         )
 
-        return make_figure(np.array(orig_xy_store), dense_xy, envelope_xy, include_pedestal)
+        return make_figure(
+            orig_xy=orig_xy,
+            dense_xy=dense_xy,
+            boundary_xy=envelope_xy,
+            include_pedestal=include_pedestal,
+            dense_custom=dense_custom,
+            orig_custom=orig_custom
+        )
 
     # Downloads
     @app.callback(Output("download-height", "data"), Input("btn-height-csv", "n_clicks"), prevent_initial_call=True)
@@ -527,8 +572,8 @@ def create_app():
         if not n_clicks:
             return dash.no_update
 
-        main_factor = int(main_factor or 2)
-        fold_factor = int(fold_factor or 2)
+        main_factor = int(main_factor or 1)
+        fold_factor = int(fold_factor or 1)
 
         f = np.array(fold_angles_store, float)
         m = np.array(main_angles_store, float)
