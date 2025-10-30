@@ -1,56 +1,90 @@
+# app/shared/geom.py
 import numpy as np
-import shapely.geometry as sgeom
-import alphashape
-from .data import MAX_POINTS_FOR_ENVELOPE, MAX_POINTS_FOR_KNN, KNN_K
+from scipy.spatial import ConvexHull, Delaunay
 
-def _sample_points(arr, max_n):
-    n = len(arr)
-    if n <= max_n:
-        return arr
-    idx = np.linspace(0, n - 1, num=max_n, dtype=int)
-    return arr[idx]
+def _to_array(xy):
+    pts = np.asarray(xy, dtype=float)
+    pts = pts[np.isfinite(pts).all(axis=1)]
+    return pts
 
-def _estimate_alpha(pts, k=KNN_K):
-    pts = _sample_points(pts, MAX_POINTS_FOR_KNN)
-    if len(pts) < k + 2:
-        return 1.0
-    A = pts[:, None, :] - pts[None, :, :]
-    D = np.sqrt((A**2).sum(axis=2))
-    D.sort(axis=1)
-    dk = np.median(D[:, k])
-    if not np.isfinite(dk) or dk <= 1e-9:
-        return 1.0
-    return 1.0 / (1.8 * dk)
+def compute_boundary_curve(xy, mode="convex", alpha=1.0):
+    """
+    Returns an ordered boundary polyline for the given 2D points.
+    mode: "none" | "convex" | "concave"
+    alpha: controls concavity (higher => more concave). Simple alpha-shape style.
+    """
+    pts = _to_array(xy)
+    if pts.shape[0] < 3:
+        return pts
+    mode = (mode or "convex").lower()
 
-def compute_boundary_curve(xy_points, prefer_concave=True):
-    pts = np.asarray(xy_points, float)
-    pts = pts[~np.isnan(pts).any(axis=1)]
-    if len(pts) < 3:
-        return None
-    pts = np.unique(pts, axis=0)
-    if len(pts) < 3:
-        return None
+    if mode == "none":
+        # No boundary; caller can just plot points
+        return np.empty((0, 2))
 
-    poly = None
-    if prefer_concave:
-        try:
-            pts_cap = _sample_points(pts, MAX_POINTS_FOR_ENVELOPE)
-            alpha = _estimate_alpha(pts_cap)
-            poly = alphashape.alphashape(pts_cap, alpha)
-        except Exception:
-            poly = None
+    if mode == "convex":
+        hull = ConvexHull(pts)
+        return pts[hull.vertices]
 
-    if poly is None:
-        poly = sgeom.MultiPoint(pts).convex_hull
+    if mode == "concave":
+        # Simple alpha-shape approximation using Delaunay & circumradius threshold
+        tri = Delaunay(pts)
+        simplices = tri.simplices
+        T = pts[simplices]  # (n_tri, 3, 2)
 
-    if isinstance(poly, sgeom.MultiPolygon):
-        poly = max(poly.geoms, key=lambda g: g.area)
+        def circumradius(a, b, c):
+            ab = np.linalg.norm(a - b)
+            bc = np.linalg.norm(b - c)
+            ca = np.linalg.norm(c - a)
+            s = (ab + bc + ca) / 2.0
+            area_sq = max(s * (s - ab) * (s - bc) * (s - ca), 0.0)
+            if area_sq == 0:
+                return np.inf
+            area = area_sq ** 0.5
+            return (ab * bc * ca) / (4.0 * area)
 
-    if isinstance(poly, sgeom.Polygon):
-        x, y = poly.exterior.coords.xy
-        return np.column_stack([x, y])
-    if isinstance(poly, sgeom.LineString):
-        x, y = poly.coords.xy
-        return np.column_stack([x, y])
+        keep = []
+        for a, b, c in T:
+            R = circumradius(a, b, c)
+            if R < 1.0 / max(alpha, 1e-6):
+                keep += [tuple(sorted((tuple(a), tuple(b)))),
+                         tuple(sorted((tuple(b), tuple(c)))),
+                         tuple(sorted((tuple(c), tuple(a))))]
 
-    return None
+        keep = list(set(keep))
+        if not keep:
+            hull = ConvexHull(pts)
+            return pts[hull.vertices]
+
+        from collections import defaultdict
+        adj = defaultdict(list)
+        for p, q in keep:
+            adj[p].append(q)
+            adj[q].append(p)
+
+        # Walk a loop (best-effort). If not closed, just return the visited chain.
+        start = next(iter(adj))
+        boundary = [start]
+        prev = None
+        curr = start
+        guard = 0
+        while guard < len(keep) + 5:
+            guard += 1
+            nbrs = adj[curr]
+            nxt = None
+            for v in nbrs:
+                if v != prev:
+                    nxt = v
+                    break
+            if nxt is None:
+                break
+            boundary.append(nxt)
+            prev, curr = curr, nxt
+            if nxt == start:
+                break
+
+        return np.array(boundary, dtype=float)
+
+    # Fallback = convex
+    hull = ConvexHull(pts)
+    return pts[hull.vertices]
