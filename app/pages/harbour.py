@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
 
-from ..shared.data import get_context, resample_grid_by_factors
+from app.shared.data import get_context, resample_grid_by_factors
 from ..shared.geom import compute_boundary_curve
 
 import dash
