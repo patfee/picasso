@@ -298,6 +298,19 @@ def create_app():
     fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
 
+    # NEW: compute the maximum actual angle gaps in the CSVs (caps for step size)
+    def _max_gap(arr: np.ndarray) -> float:
+        arr = np.unique(np.asarray(arr, dtype=float))
+        arr.sort()
+        if len(arr) < 2:
+            return 0.5  # fallback to UI min
+        gaps = np.diff(arr)
+        gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
+        return float(np.max(gaps)) if gaps.size else 0.5
+
+    MAIN_MAX_STEP = max(0.5, round(_max_gap(main_angles), 2))
+    FOLD_MAX_STEP = max(0.5, round(_max_gap(fold_angles), 2))
+
     # Shared Stores
     stores = html.Div([
         dcc.Store(id="orig-xy", data=orig_xy.tolist()),
@@ -327,18 +340,19 @@ def create_app():
         ),
     ], style={"position": "relative", "padding": "12px 16px 4px 16px"})
 
-    # ---- Helper: Slider + Number input (no style on dcc.Slider) ----
-    def slider_with_input(slider_id, input_id, default=1.0):
+    # ---- Helper: Slider + Number input (2 dp and dynamic max) ----
+    def slider_with_input(slider_id, input_id, default=1.0, max_val=10.0):
+        default = float(min(max(default, 0.5), max_val))
         return html.Div(
             [
                 html.Div(
                     dcc.Slider(
                         id=slider_id,
-                        min=0.5,  # UI min; logic will also clamp to span
-                        max=10.0, # UI max
-                        step=0.1,
+                        min=0.5,
+                        max=max_val,                # dynamic cap from CSV
+                        step=0.01,                  # 2-decimal resolution
                         value=default,
-                        marks=_three_marks(0.5, 10.0, "°"),
+                        marks=_three_marks(0.5, max_val, "°"),
                         included=False,
                         updatemode="mouseup",
                         tooltip={"placement": "bottom", "always_visible": False},
@@ -347,9 +361,13 @@ def create_app():
                     style={"flex": "1 1 auto", "marginRight": "8px"}
                 ),
                 dcc.Input(
-                    id=input_id, type="number", value=default,
-                    min=0.5, max=10.0, step=0.1,
-                    style={"width": "90px", "height": "28px", "fontFamily": "monospace"}
+                    id=input_id,
+                    type="number",
+                    value=round(default, 2),       # show 2 dp
+                    min=0.5,
+                    max=max_val,                   # dynamic cap
+                    step=0.01,                     # 2-decimal steps
+                    style={"width": "90px", "height": "28px", "fontFamily": "monospace", "textAlign": "right"}
                 ),
             ],
             style={"display": "flex", "alignItems": "center", "gap": "6px"}
@@ -358,11 +376,11 @@ def create_app():
     # Controls
     envelope_controls = html.Div([
         html.Label("Step between Main-jib matrix angles (°)", style={"fontWeight": 600}),
-        slider_with_input("slider-main-step", "input-main-step"),
+        slider_with_input("slider-main-step", "input-main-step", default=1.0, max_val=MAIN_MAX_STEP),
         html.Div(id="main-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
 
         html.Label("Step between Folding-jib matrix angles (°)", style={"fontWeight": 600, "marginTop": "10px"}),
-        slider_with_input("slider-fold-step", "input-fold-step"),
+        slider_with_input("slider-fold-step", "input-fold-step", default=1.0, max_val=FOLD_MAX_STEP),
         html.Div(id="fold-range", style={"marginTop": "6px", "fontFamily": "monospace", "color": "#444"}),
 
         dcc.Checklist(
@@ -453,8 +471,18 @@ def create_app():
     )
     def show_ranges(main_angles_store, fold_angles_store):
         main_arr, fold_arr = np.array(main_angles_store, float), np.array(fold_angles_store, float)
-        return (f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}°",
-                f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}°")
+
+        def _max_gap_local(arr):
+            arr = np.unique(np.asarray(arr, dtype=float))
+            arr.sort()
+            gaps = np.diff(arr)
+            gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
+            return float(np.max(gaps)) if gaps.size else 0.5
+
+        return (
+            f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}° (max step allowed: {_max_gap_local(main_arr):.2f}°)",
+            f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}° (max step allowed: {_max_gap_local(fold_arr):.2f}°)",
+        )
 
     # Envelope type explanation
     @app.callback(
@@ -485,19 +513,26 @@ def create_app():
     )
     def sync_main(slider_val, input_val, main_angles_store):
         m = np.array(main_angles_store, float)
-        span = max(0.5, float(m.max() - m.min()))
 
-        def clamp(v):
+        def allowed_max(arr):
+            arr = np.unique(np.asarray(arr, dtype=float)); arr.sort()
+            gaps = np.diff(arr); gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
+            return float(np.max(gaps)) if gaps.size else 0.5
+
+        cap = max(0.5, allowed_max(m))
+
+        def clamp2(v):
             try:
                 v = float(v)
             except Exception:
                 v = 1.0
             if not np.isfinite(v):
                 v = 1.0
-            return float(min(max(v, 0.5), span))
+            v = min(max(v, 0.5), cap)
+            return round(v, 2)
 
         trig = dash.ctx.triggered_id  # Dash 3
-        v = clamp(slider_val if trig == "slider-main-step" else input_val)
+        v = clamp2(slider_val if trig == "slider-main-step" else input_val)
         return v, v
 
     # Keep slider and numeric input linked (Folding)
@@ -511,19 +546,26 @@ def create_app():
     )
     def sync_fold(slider_val, input_val, fold_angles_store):
         f = np.array(fold_angles_store, float)
-        span = max(0.5, float(f.max() - f.min()))
 
-        def clamp(v):
+        def allowed_max(arr):
+            arr = np.unique(np.asarray(arr, dtype=float)); arr.sort()
+            gaps = np.diff(arr); gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
+            return float(np.max(gaps)) if gaps.size else 0.5
+
+        cap = max(0.5, allowed_max(f))
+
+        def clamp2(v):
             try:
                 v = float(v)
             except Exception:
                 v = 1.0
             if not np.isfinite(v):
                 v = 1.0
-            return float(min(max(v, 0.5), span))
+            v = min(max(v, 0.5), cap)
+            return round(v, 2)
 
-        trig = dash.ctx.triggered_id  # Dash 3
-        v = clamp(slider_val if trig == "slider-fold-step" else input_val)
+        trig = dash.ctx.triggered_id
+        v = clamp2(slider_val if trig == "slider-fold-step" else input_val)
         return v, v
 
     # Graph update (drive from numeric inputs; sliders mirror them)
@@ -544,20 +586,27 @@ def create_app():
 
         m = np.array(main_angles_store, float)
         f = np.array(fold_angles_store, float)
-        m_span = max(0.5, float(m.max() - m.min()))
-        f_span = max(0.5, float(f.max() - f.min()))
 
-        def clamp(v, span):
+        def allowed_max(arr):
+            arr = np.unique(np.asarray(arr, dtype=float)); arr.sort()
+            gaps = np.diff(arr); gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
+            return float(np.max(gaps)) if gaps.size else 0.5
+
+        m_cap = max(0.5, allowed_max(m))
+        f_cap = max(0.5, allowed_max(f))
+
+        def clamp2(v, cap):
             try:
                 v = float(v)
             except Exception:
                 v = 1.0
             if not np.isfinite(v):
                 v = 1.0
-            return float(min(max(v, 0.5), span))
+            v = min(max(v, 0.5), cap)
+            return round(v, 2)
 
-        main_step = clamp(main_step, m_span)
-        fold_step = clamp(fold_step, f_span)
+        main_step = clamp2(main_step, m_cap)
+        fold_step = clamp2(fold_step, f_cap)
 
         _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
                                         d_fold=fold_step, d_main=main_step)
@@ -601,20 +650,27 @@ def create_app():
 
         m = np.array(main_angles_store, float)
         f = np.array(fold_angles_store, float)
-        m_span = max(0.5, float(m.max() - m.min()))
-        f_span = max(0.5, float(f.max() - f.min()))
 
-        def clamp(v, span):
+        def allowed_max(arr):
+            arr = np.unique(np.asarray(arr, dtype=float)); arr.sort()
+            gaps = np.diff(arr); gaps = gaps[np.isfinite(gaps) & (gaps > 0)]
+            return float(np.max(gaps)) if gaps.size else 0.5
+
+        m_cap = max(0.5, allowed_max(m))
+        f_cap = max(0.5, allowed_max(f))
+
+        def clamp2(v, cap):
             try:
                 v = float(v)
             except Exception:
                 v = 1.0
             if not np.isfinite(v):
                 v = 1.0
-            return float(min(max(v, 0.5), span))
+            v = min(max(v, 0.5), cap)
+            return round(v, 2)
 
-        main_step = clamp(main_step, m_span)
-        fold_step = clamp(fold_step, f_span)
+        main_step = clamp2(main_step, m_cap)
+        fold_step = clamp2(fold_step, f_cap)
 
         include_pedestal = "on" in (pedestal_value or [])
         _, _, _, _, pts = resample_grid(np.array(fold_angles_store), np.array(main_angles_store),
