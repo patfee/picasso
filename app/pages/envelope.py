@@ -3,7 +3,7 @@ import plotly.graph_objects as go
 import numpy as np
 
 from app.shared.data import get_context, resample_grid_by_factors
-from ..shared.geom import compute_boundary_curve, _sample_points
+from app.shared.data import compute_boundary_curve, _sample_points
 
 # Register page
 import dash
