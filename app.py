@@ -86,17 +86,24 @@ def load_matrix_csv(path: str) -> pd.DataFrame:
 # =========================
 # Geometry & interpolation
 # =========================
-def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame):
+def build_interpolators(height_df: pd.DataFrame, outreach_df: pd.DataFrame, load_df: pd.DataFrame):
     fold_angles = height_df.index.values.astype(float)
     main_angles = height_df.columns.values.astype(float)
+
+    # align all to the same axes
     outreach_df = outreach_df.loc[fold_angles, main_angles]
+    load_df = load_df.loc[fold_angles, main_angles]
+
     height_itp = RegularGridInterpolator(
         (fold_angles, main_angles), height_df.values, bounds_error=False, fill_value=None
     )
     outre_itp = RegularGridInterpolator(
         (fold_angles, main_angles), outreach_df.values, bounds_error=False, fill_value=None
     )
-    return fold_angles, main_angles, height_itp, outre_itp
+    load_itp = RegularGridInterpolator(
+        (fold_angles, main_angles), load_df.values, bounds_error=False, fill_value=None
+    )
+    return fold_angles, main_angles, height_itp, outre_itp, load_itp
 
 
 def resample_grid_by_factors(fold_angles, main_angles, fold_factor, main_factor):
@@ -182,9 +189,12 @@ def create_app():
     height_df = load_matrix_csv(os.path.join(DATA_DIR, HEIGHT_CSV))
     outreach_df = load_matrix_csv(os.path.join(DATA_DIR, OUTREACH_CSV))
     load_df = load_matrix_csv(os.path.join(DATA_DIR, LOAD_CSV))
+    # ensure alignment
     load_df = load_df.reindex(index=height_df.index, columns=height_df.columns)
 
-    fold_angles, main_angles, height_itp, outre_itp = build_interpolators(height_df, outreach_df)
+    fold_angles, main_angles, height_itp, outre_itp, load_itp = build_interpolators(height_df, outreach_df, load_df)
+
+    # originals (for envelope page)
     orig_xy = np.column_stack([outreach_df.values.ravel(), height_df.values.ravel()])
     F0, M0 = np.meshgrid(fold_angles, main_angles, indexing="ij")
     orig_custom = np.column_stack([F0.ravel(), M0.ravel()])
@@ -263,14 +273,12 @@ def create_app():
 
     envelope_graph = html.Div([
         dcc.Graph(id="graph", style={"height": "78vh"}),
-        html.Div([
-            dash_table.DataTable()
-        ])
     ], style={"flex": "1 1 auto", "paddingLeft": "16px"})
 
     envelope_page = html.Div([envelope_controls, envelope_graph],
                              style={"display": "flex", "padding": "16px", "gap": "10px"})
 
+    # --- Test + TTS pages (unchanged content-wise) ---
     test_page = html.Div([html.H3("Test Page"), html.P("Placeholder for future content.")],
                          style={"padding": "16px"})
 
@@ -292,12 +300,25 @@ def create_app():
         ]),
     ], style={"padding": "16px"})
 
-    # --- Harbour Mode page ---
-    harbour_page = html.Div([
-        html.H3("Harbour Mode (Cdyn 1.15)", style={"marginTop": 0}),
-        dcc.Graph(id="harbour-heatmap", style={"height": "88vh"}),
-    ], style={"padding": "16px"})
+    # --- Harbour Mode page with SAME interval selectors ---
+    harbour_controls = html.Div([
+        factor_dropdown("harbour-main-factor", "Main-jib subdivision", [1, 2, 4, 8], 1),
+        factor_dropdown("harbour-fold-factor", "Folding-jib subdivision", [1, 2, 4, 8, 16], 1),
+        html.Div(id="harbour-range", style={"fontFamily": "monospace", "color": "#444"}),
+    ], style={"flex": "0 0 340px", "overflowY": "auto", "height": "88vh",
+              "paddingRight": "12px", "borderRight": "1px solid #eee"})
 
+    harbour_graph = html.Div([
+        dcc.Graph(id="harbour-heatmap", style={"height": "88vh"}),
+    ], style={"flex": "1 1 auto", "paddingLeft": "16px"})
+
+    harbour_page = html.Div([
+        html.H3("Harbour Mode (Cdyn 1.15)", style={"margin": "16px 16px 0 16px"}),
+        html.Div([harbour_controls, harbour_graph],
+                 style={"display": "flex", "padding": "0 16px 16px 16px", "gap": "10px"}),
+    ], style={"padding": "0"})
+
+    # ---- App layout & router ----
     content = html.Div(id="page-content", style={"width": "100%"}, children=envelope_page)
 
     app.layout = html.Div([
@@ -308,7 +329,6 @@ def create_app():
         ], style={"display": "flex"})
     ])
 
-    # --- Routing ---
     @app.callback(Output("page-content", "children"), Input("url", "pathname"))
     def route(path):
         if path in ("/", "/envelope", None):
@@ -321,34 +341,182 @@ def create_app():
             return tts_page
         return html.Div([html.H3("404"), html.P(f"Path not found: {path}")], style={"padding": "16px"})
 
-    # --- Harbour contour plot ---
-    @app.callback(Output("harbour-heatmap", "figure"),
-                  Input("url", "pathname"), prevent_initial_call=False)
-    def draw_harbour_heatmap(_):
-        R = outreach_df.values.ravel()
-        H = height_df.values.ravel()
-        Z = load_df.values.ravel()
-        mask = np.isfinite(R) & np.isfinite(H) & np.isfinite(Z)
-        R, H, Z = R[mask], H[mask], Z[mask]
+    # ---- Ranges text (envelope page) ----
+    @app.callback(
+        Output("main-range", "children"),
+        Output("fold-range", "children"),
+        Input("main-angles", "data"),
+        Input("fold-angles", "data"),
+    )
+    def show_ranges(main_angles_store, fold_angles_store):
+        main_arr, fold_arr = np.array(main_angles_store, float), np.array(fold_angles_store, float)
+        return (
+            f"Main-jib angle range: {main_arr.min():.2f}° – {main_arr.max():.2f}° "
+            f"(original points: {len(np.unique(main_arr))})",
+            f"Folding-jib angle range: {fold_arr.min():.2f}° – {fold_arr.max():.2f}° "
+            f"(original points: {len(np.unique(fold_arr))})",
+        )
 
+    @app.callback(Output("envelope-help", "children"), Input("envelope-type", "value"))
+    def explain_envelope(kind):
+        if kind == "none":
+            return "Displays only points (no envelope). Useful for checking interpolation coverage."
+        if kind == "concave":
+            return "Concave alpha shape: tighter, realistic shape but sensitive to sparse data."
+        return "Convex hull: stable and conservative outer boundary."
+
+    # ---- Envelope graph update ----
+    @app.callback(
+        Output("graph", "figure"),
+        Input("main-factor", "value"),
+        Input("fold-factor", "value"),
+        Input("pedestal-toggle", "value"),
+        Input("envelope-type", "value"),
+        State("orig-xy", "data"),
+        State("orig-angles", "data"),
+        State("fold-angles", "data"),
+        State("main-angles", "data"),
+    )
+    def update_figure(main_factor, fold_factor, pedestal_value, envelope_value,
+                      orig_xy_store, orig_angles_store, fold_angles_store, main_angles_store):
+        include_pedestal = "on" in (pedestal_value or [])
+        prefer_concave = (envelope_value == "concave")
+        draw_envelope = (envelope_value != "none")
+
+        main_factor = int(main_factor or 1)
+        fold_factor = int(fold_factor or 1)
+
+        f = np.array(fold_angles_store, float)
+        m = np.array(main_angles_store, float)
+
+        _, _, _, _, pts = resample_grid_by_factors(f, m, fold_factor, main_factor)
+
+        H_dense = height_itp(pts)
+        R_dense = outre_itp(pts)
+        if include_pedestal:
+            H_dense = H_dense + PEDESTAL_HEIGHT_M
+
+        dense_xy = np.column_stack([R_dense, H_dense])
+        dense_xy = dense_xy[~np.isnan(dense_xy).any(axis=1)]
+        dense_custom = pts  # [Folding, Main]
+
+        # Originals (for plotting)
+        orig_xy = np.array(orig_xy_store, dtype=float)
+        orig_custom = np.array(orig_angles_store, dtype=float)
+
+        envelope_xy = None
+        if draw_envelope:
+            envelope_xy = compute_boundary_curve(
+                _sample_points(dense_xy, MAX_POINTS_FOR_ENVELOPE),
+                prefer_concave=prefer_concave
+            )
+
+        # Build figure
+        fig = go.Figure()
+
+        # dense/interpolated points
+        dense_for_plot = _sample_points(dense_xy, MAX_POINTS_FOR_DISPLAY)
+        if dense_for_plot.size:
+            pedestal_str = "yes" if include_pedestal else "no"
+            hover_tmpl = (
+                "Main Jib: %{customdata[1]:.2f} deg, Folding Jib: %{customdata[0]:.2f} deg<br>"
+                "Outreach: %{x:.2f} m, Height: %{y:.2f} m<br>"
+                f"Pedestal: {pedestal_str}<extra></extra>"
+            )
+            dense_custom_plot = _sample_points(dense_custom, MAX_POINTS_FOR_DISPLAY)
+            fig.add_trace(go.Scatter(
+                x=dense_for_plot[:, 0],
+                y=dense_for_plot[:, 1],
+                mode="markers",
+                marker=dict(size=4, symbol="diamond", opacity=0.5),
+                name="Interpolated points",
+                customdata=dense_custom_plot,
+                hovertemplate=hover_tmpl
+            ))
+
+        # original points
+        if orig_xy.size:
+            fig.add_trace(go.Scatter(
+                x=orig_xy[:, 0],
+                y=orig_xy[:, 1] + (PEDESTAL_HEIGHT_M if include_pedestal else 0.0),
+                mode="markers",
+                marker=dict(size=8),
+                name="Original matrix points",
+                customdata=orig_custom,
+                hovertemplate=hover_tmpl
+            ))
+
+        if envelope_xy is not None and len(envelope_xy) > 2:
+            fig.add_trace(go.Scatter(
+                x=envelope_xy[:, 0], y=envelope_xy[:, 1],
+                mode="lines", line=dict(width=3),
+                name="Envelope",
+            ))
+
+        fig.update_layout(
+            xaxis_title="Outreach [m]",
+            yaxis_title="Jib head height [m]" if include_pedestal
+                       else "Jib head above pedestal flange [m]",
+            template="plotly_white",
+            legend=dict(orientation="h", yanchor="top", y=1.02, xanchor="left", x=0),
+            margin=dict(l=40, r=20, t=60, b=40),
+            uirevision="keep",
+        )
+        return fig
+
+    # ---- Harbour: show range text for clarity ----
+    @app.callback(
+        Output("harbour-range", "children"),
+        Input("harbour-main-factor", "value"),
+        Input("harbour-fold-factor", "value"),
+    )
+    def harbour_ranges(main_factor, fold_factor):
+        return (f"Subdivisions — Main: {int(main_factor or 1)}× per-interval, "
+                f"Folding: {int(fold_factor or 1)}× per-interval")
+
+    # ---- Harbour contour plot with SAME selectors ----
+    @app.callback(
+        Output("harbour-heatmap", "figure"),
+        Input("harbour-main-factor", "value"),
+        Input("harbour-fold-factor", "value"),
+    )
+    def draw_harbour_heatmap(main_factor, fold_factor):
+        main_factor = int(main_factor or 1)
+        fold_factor = int(fold_factor or 1)
+
+        # Interpolate in (Folding,Main) angle space first
+        _, _, _, _, pts = resample_grid_by_factors(fold_angles, main_angles, fold_factor, main_factor)
+        R_dense = outre_itp(pts)              # Outreach [m]
+        H_dense = height_itp(pts)             # Height [m] (NO pedestal)
+        Z_dense = load_itp(pts)               # Load [t] (Harbour, Cdyn=1.15)
+
+        dense = np.column_stack([R_dense, H_dense, Z_dense])
+        dense = dense[~np.isnan(dense).any(axis=1)]
+        R, H, Z = dense[:, 0], dense[:, 1], dense[:, 2]
+
+        # Regular grid in geometric plane
         r_lin = np.linspace(np.min(R), np.max(R), 200)
         h_lin = np.linspace(np.min(H), np.max(H), 200)
         RR, HH = np.meshgrid(r_lin, h_lin)
+
+        # Interpolate Z onto (RR,HH)
         Z_grid = griddata(np.column_stack([R, H]), Z, (RR, HH), method="linear")
         if np.isnan(Z_grid).any():
             Z_nn = griddata(np.column_stack([R, H]), Z, (RR, HH), method="nearest")
             Z_grid = np.where(np.isnan(Z_grid), Z_nn, Z_grid)
 
+        # Envelope based on dense geometry points
         env_xy = compute_boundary_curve(np.column_stack([R, H]), True)
         if env_xy is not None and len(env_xy) > 2:
             try:
                 poly = sgeom.Polygon(env_xy)
-                pts = np.column_stack([RR.ravel(), HH.ravel()])
-                inside = np.array([poly.contains(sgeom.Point(xy)) for xy in pts]).reshape(RR.shape)
+                pts_grid = np.column_stack([RR.ravel(), HH.ravel()])
+                inside = np.array([poly.contains(sgeom.Point(xy)) for xy in pts_grid]).reshape(RR.shape)
                 Z_grid = np.where(inside, Z_grid, np.nan)
             except Exception:
                 pass
 
+        # Discrete bands + marine dark style
         levels = dict(start=0, end=140, size=35, coloring="heatmap", showlines=False)
         colorscale = [
             [0.00, "#00b8ff"],
@@ -386,7 +554,7 @@ def create_app():
         )
         return fig
 
-    # --- TTS Data downloads ---
+    # ---- TTS Data downloads ----
     @app.callback(Output("download-tts-ga", "data"),
                   Input("btn-tts-ga", "n_clicks"), prevent_initial_call=True)
     def download_tts_ga(_):
@@ -412,4 +580,5 @@ def create_app():
 app, server = create_app()
 
 if __name__ == "__main__":
+    # In production run with gunicorn. This is for local runs:
     app.run_server(host="0.0.0.0", port=int(os.getenv("PORT", 3000)), debug=True)
