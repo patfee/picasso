@@ -2,7 +2,7 @@ from dash import html, dcc, callback, Output, Input, State
 import plotly.graph_objects as go
 import numpy as np
 
-from ..shared.data import get_context, resample_grid_by_factors
+from app.shared.data import get_context, resample_grid_by_factors
 from ..shared.geom import compute_boundary_curve, _sample_points
 
 # Register page
