@@ -1,63 +1,70 @@
 import os
-from flask import Flask
+from pathlib import Path
 import dash
+import dash_bootstrap_components as dbc
+from flask import Flask
 from dash import html, dcc
-import dash_bootstrap_components as dbc  # optional; safe to keep even if unused
 
-# Resolve assets folder (assumes project tree: ./assets next to ./app)
-ASSETS_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets"))
+# --- Environment variables / defaults ---
+DATA_DIR = os.getenv("DATA_DIR", "./data")
+ASSETS_DIR = os.getenv("ASSETS_DIR", "./assets")
+LOGO_URL = os.getenv("LOGO_URL", "/assets/dcn_logo.svg")
 
+# --- Define Flask + Dash app ---
 server = Flask(__name__)
+
+# Explicitly define pages folder path (important for clean import)
+PAGES_DIR = str(Path(__file__).with_name("pages"))
+
 app = dash.Dash(
     __name__,
     server=server,
-    use_pages=True,               # Dash Pages
-    assets_folder=ASSETS_PATH,    # serve from ../assets
+    use_pages=True,
+    pages_folder=PAGES_DIR,
     suppress_callback_exceptions=True,
-    title="DCN Picasso DSV Engineering Data",
     external_stylesheets=[dbc.themes.BOOTSTRAP],
+    title="DCN Picasso DSV Engineering Data",
 )
 
-# Left menu (auto-built from registered pages)
+# --- Layout with simple sidebar navigation ---
 sidebar = html.Div(
     [
         html.H3("Menu", style={"marginTop": 0}),
-        html.Div(
-            [
-                # order pages explicitly (path defines navigation)
-                dcc.Link("140T main hoist envelope", href="/envelope", className="nav-link"),
-                html.Br(),
-                dcc.Link("Harbour Mode", href="/harbour", className="nav-link"),
-                html.Br(),
-                dcc.Link("Test", href="/test", className="nav-link"),
-                html.Br(),
-                dcc.Link("TTS Data", href="/tts", className="nav-link"),
-            ]
-        ),
+        dcc.Link("140T Main Hoist Envelope", href="/envelope", className="nav-link"),
+        html.Br(),
+        dcc.Link("Harbour Mode", href="/harbour", className="nav-link"),
+        html.Br(),
+        dcc.Link("TTS Data", href="/tts_data", className="nav-link"),
+        html.Br(),
+        dcc.Link("Test", href="/test", className="nav-link"),
     ],
     style={
-        "position": "sticky", "top": "0px", "height": "100vh",
-        "padding": "16px", "borderRight": "1px solid #e5e7eb", "background": "#fafafa",
-        "width": "260px", "flex": "0 0 260px",
+        "position": "sticky",
+        "top": "0px",
+        "height": "100vh",
+        "padding": "16px",
+        "borderRight": "1px solid #e5e7eb",
+        "background": "#fafafa",
     },
 )
 
-# Header
-LOGO_URL = os.getenv("LOGO_URL", "/assets/dcn_logo.svg")
 header = html.Div(
     [
         html.H2("DCN Picasso DSV Engineering Data", style={"margin": 0}),
         html.Img(
             src=LOGO_URL,
-            style={"height": "42px", "objectFit": "contain", "position": "absolute", "right": "16px", "top": "12px"},
+            style={
+                "height": "42px",
+                "objectFit": "contain",
+                "position": "absolute",
+                "right": "16px",
+                "top": "12px",
+            },
             alt="DCN Diving logo",
         ),
     ],
     style={"position": "relative", "padding": "12px 16px 4px 16px"},
 )
-
-# Page container (Dash Pages renders the active page here)
-content = html.Div(dash.page_container, style={"flex": "1 1 auto"})
 
 app.layout = html.Div(
     [
@@ -65,8 +72,8 @@ app.layout = html.Div(
         header,
         html.Div(
             [
-                sidebar,
-                content,
+                html.Div(sidebar, style={"width": "260px", "flex": "0 0 260px"}),
+                html.Div(dash.page_container, style={"flex": "1 1 auto"}),
             ],
             style={"display": "flex", "gap": "0px"},
         ),
@@ -74,9 +81,4 @@ app.layout = html.Div(
 )
 
 if __name__ == "__main__":
-    port = os.getenv("PORT")
-    if not port or not port.isdigit():
-        port = 3000
-    else:
-        port = int(port)
-    app.run_server(host="0.0.0.0", port=port, debug=True)
+    app.run_server(host="0.0.0.0", port=int(os.getenv("PORT", 3000)), debug=True)
